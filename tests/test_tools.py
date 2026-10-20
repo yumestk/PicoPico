@@ -17,8 +17,8 @@ def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
 
     result = tool_read_file(context, {"path": "sample.txt", "start": 1, "end": 1})
 
-    assert "# sample.txt" in result
-    assert "alpha" in result
+    assert "# sample.txt" in result["text"]
+    assert "alpha" in result["text"]
 
 
 def test_delegate_uses_context_spawn_without_runtime_import(tmp_path):
@@ -34,7 +34,7 @@ def test_delegate_uses_context_spawn_without_runtime_import(tmp_path):
 
     result = tool_delegate(context, {"task": "inspect README.md", "max_steps": 2})
 
-    assert result == "delegate_result:\nDone"
+    assert result["text"] == "delegate_result:\nDone"
     assert calls == [{"task": "inspect README.md", "max_steps": 2}]
 
 

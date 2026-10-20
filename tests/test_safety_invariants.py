@@ -30,9 +30,9 @@ def test_workspace_escape_is_rejected(tmp_path):
     (tmp_path / "outside.txt").write_text("outside\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
 
-    result = agent.run_tool("read_file", {"path": "../outside.txt"})
+    result = agent.execute_tool("read_file", {"path": "../outside.txt"})
 
-    assert "path escapes workspace" in result
+    assert "path escapes workspace" in result.content
 
 
 def test_symlink_path_traversal_is_rejected(tmp_path):
@@ -41,17 +41,17 @@ def test_symlink_path_traversal_is_rejected(tmp_path):
     (tmp_path / "linked.txt").symlink_to(outside)
     agent = build_agent(tmp_path, [])
 
-    result = agent.run_tool("read_file", {"path": "linked.txt"})
+    result = agent.execute_tool("read_file", {"path": "linked.txt"})
 
-    assert "path escapes workspace" in result
+    assert "path escapes workspace" in result.content
 
 
 def test_risky_tool_deny_behavior(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="never")
 
-    result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
+    result = agent.execute_tool("run_shell", {"command": "echo hi", "timeout": 20})
 
-    assert result == "error: approval denied for run_shell"
+    assert result.content == "error: approval denied for run_shell"
 
 
 def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
@@ -150,10 +150,10 @@ def test_run_shell_uses_allowlisted_environment_only(tmp_path):
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
 
     with patch.dict(os.environ, {"PICO_ALLOWLIST_SECRET": secret}, clear=False):
-        result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+        result = agent.execute_tool("run_shell", {"command": command, "timeout": 20})
 
-    assert secret not in result
-    assert "missing" in result
+    assert secret not in result.content
+    assert "missing" in result.content
 
 
 def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
@@ -167,7 +167,7 @@ def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
         )()
         shell_result = agent.tool_run_shell({"command": "echo bypass", "timeout": 20})
 
-    assert "toolkit-shell" in shell_result
+    assert "toolkit-shell" in shell_result["stdout"]
     fake_run.assert_called_once()
     assert agent.tool_run_shell.__func__.__module__ == "pico.runtime"
 

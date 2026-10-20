@@ -232,7 +232,7 @@ def test_patch_file_replaces_exact_match(tmp_path):
     file_path.write_text("hello world\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
 
-    result = agent.run_tool(
+    result = agent.execute_tool(
         "patch_file",
         {
             "path": "sample.txt",
@@ -241,7 +241,7 @@ def test_patch_file_replaces_exact_match(tmp_path):
         },
     )
 
-    assert result == "patched sample.txt"
+    assert result.content == "patched sample.txt"
     assert file_path.read_text(encoding="utf-8") == "hello agent\n"
 
 
@@ -249,10 +249,10 @@ def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="ask")
 
     with patch("builtins.input") as mock_input:
-        result = agent.run_tool("write_file", {})
+        result = agent.execute_tool("write_file", {})
 
-    assert result.startswith("error: invalid arguments for write_file: 'path'")
-    assert 'example: <tool name="write_file"' in result
+    assert result.content.startswith("error: invalid arguments for write_file: missing required argument: path")
+    assert result.error_code == "invalid_arguments"
     mock_input.assert_not_called()
 
 
@@ -262,11 +262,11 @@ def test_list_files_hides_internal_agent_state(tmp_path):
     (tmp_path / ".git").mkdir(exist_ok=True)
     (tmp_path / "hello.txt").write_text("hi\n", encoding="utf-8")
 
-    result = agent.run_tool("list_files", {})
+    result = agent.execute_tool("list_files", {})
 
-    assert ".pico" not in result
-    assert ".git" not in result
-    assert "[F] hello.txt" in result
+    assert ".pico" not in result.content
+    assert ".git" not in result.content
+    assert "[F] hello.txt" in result.content
 
 
 def test_repeated_identical_tool_call_is_rejected(tmp_path):
@@ -274,9 +274,9 @@ def test_repeated_identical_tool_call_is_rejected(tmp_path):
     agent.record({"role": "tool", "name": "list_files", "args": {}, "content": "(empty)", "created_at": "1"})
     agent.record({"role": "tool", "name": "list_files", "args": {}, "content": "(empty)", "created_at": "2"})
 
-    result = agent.run_tool("list_files", {})
+    result = agent.execute_tool("list_files", {})
 
-    assert result == "error: repeated identical tool call for list_files; choose a different tool or return a final answer"
+    assert result.content == "error: repeated identical tool call for list_files; choose a different tool or return a final answer"
 
 
 def test_welcome_screen_keeps_box_shape_for_long_paths(tmp_path):
@@ -1301,7 +1301,7 @@ def test_resume_invalidates_stale_file_summaries_and_marks_partial_stale(tmp_pat
 def test_run_shell_nonzero_with_workspace_change_is_recorded_as_partial_success(tmp_path):
     agent = build_agent(tmp_path, [])
 
-    result = agent.run_tool(
+    result = agent.execute_tool(
         "run_shell",
         {
             "command": "printf 'changed\\n' > README.md && exit 1",
@@ -1309,10 +1309,10 @@ def test_run_shell_nonzero_with_workspace_change_is_recorded_as_partial_success(
         },
     )
 
-    assert "exit_code: 1" in result
-    assert agent._last_tool_result_metadata["tool_status"] == "partial_success"
-    assert agent._last_tool_result_metadata["affected_paths"] == ["README.md"]
-    assert agent._last_tool_result_metadata["workspace_changed"] is True
+    assert "exit_code: 1" in result.content
+    assert result.metadata["tool_status"] == "partial_success"
+    assert result.metadata["affected_paths"] == ["README.md"]
+    assert result.metadata["workspace_changed"] is True
 
 
 def test_resume_marks_workspace_mismatch_when_checkpoint_runtime_identity_is_stale(tmp_path):
@@ -1576,7 +1576,7 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
 def test_partial_success_creates_process_note_for_exploration_history(tmp_path):
     agent = build_agent(tmp_path, [])
 
-    agent.run_tool(
+    agent.execute_tool(
         "run_shell",
         {
             "command": "printf 'changed\\n' > README.md && exit 1",

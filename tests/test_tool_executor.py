@@ -1,5 +1,8 @@
 from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
-from pico.tool_executor import ToolExecutor, ToolExecutionResult
+from pico.tool_executor import ToolExecutor
+from pico.tool_result import ToolExecutionResult
+
+import pytest
 
 
 def build_agent(tmp_path):
@@ -26,10 +29,25 @@ def test_tool_executor_returns_content_and_metadata_without_side_channel(tmp_pat
     assert result.metadata["workspace_changed"] is False
 
 
-def test_pico_run_tool_keeps_compatibility_metadata(tmp_path):
+def test_pico_returns_structured_result(tmp_path):
     agent = build_agent(tmp_path)
 
-    content = agent.run_tool("read_file", {"path": "README.md", "start": 1, "end": 1})
+    result = agent.execute_tool("read_file", {"path": "README.md", "start": 1, "end": 1})
 
-    assert "# README.md" in content
-    assert agent._last_tool_result_metadata["tool_status"] == "ok"
+    assert "# README.md" in result.content
+    assert result.metadata["tool_status"] == "ok"
+
+
+@pytest.mark.parametrize("args", [{"timeout": True, "command": "echo bad"},
+                                 {"command": "echo bad", "extra": 1}])
+def test_invalid_schema_never_executes_or_asks(tmp_path, args):
+    agent = build_agent(tmp_path)
+    agent.approve = lambda *_: pytest.fail("invalid arguments must not request approval")
+    assert agent.execute_tool("run_shell", args).error_code == "invalid_arguments"
+
+
+def test_shell_exit_code_is_not_parsed_from_output(tmp_path):
+    agent = build_agent(tmp_path)
+    result = agent.execute_tool("run_shell", {"command": "printf 'exit_code: 0'; exit 7"})
+    assert result.data["exit_code"] == 7
+    assert result.status == "error"

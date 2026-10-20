@@ -6,63 +6,77 @@
 
 import shutil
 import subprocess
-import textwrap
 from functools import partial
 
 from .workspace import IGNORED_PATH_NAMES
 
-BASE_TOOL_SPECS = {
-    "list_files": {
-        "schema": {"path": "str='.'"},
-        "risky": False,
-        "description": "List files in the workspace.",
-    },
-    "read_file": {
-        "schema": {"path": "str", "start": "int=1", "end": "int=200"},
-        "risky": False,
-        "description": "Read a UTF-8 file by line range.",
-    },
-    "search": {
-        "schema": {"pattern": "str", "path": "str='.'"},
-        "risky": False,
-        "description": "Search the workspace with rg or a simple fallback.",
-    },
-    "run_shell": {
-        "schema": {"command": "str", "timeout": "int=20"},
-        "risky": True,
-        "description": "Run a shell command in the repo root.",
-    },
-    "write_file": {
-        "schema": {"path": "str", "content": "str"},
-        "risky": True,
-        "description": "Write a text file.",
-    },
-    "patch_file": {
-        "schema": {"path": "str", "old_text": "str", "new_text": "str"},
-        "risky": True,
-        "description": "Replace one exact text block in a file.",
-    },
-}
+def object_schema(properties, required=()):
+    return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
 
-DELEGATE_TOOL_SPEC = {
-    "schema": {"task": "str", "max_steps": "int=3"},
-    "risky": False,
-    "description": "Ask a bounded read-only child agent to investigate.",
+
+def string_schema(default=None, nonempty=False):
+    schema = {"type": "string"}
+    if default is not None:
+        schema["default"] = default
+    if nonempty:
+        schema["minLength"] = 1
+    return schema
+
+
+def integer_schema(default, minimum=1, maximum=None):
+    schema = {"type": "integer", "default": default, "minimum": minimum}
+    if maximum is not None:
+        schema["maximum"] = maximum
+    return schema
+
+
+BASE_TOOL_SPECS = {
+    "list_files": {"schema": object_schema({"path": string_schema(".")}), "risky": False,
+                   "description": "List files in the workspace."},
+    "read_file": {"schema": object_schema({"path": string_schema(nonempty=True), "start": integer_schema(1),
+                  "end": integer_schema(200)}, ["path"]), "risky": False,
+                  "description": "Read a UTF-8 file by line range."},
+    "search": {"schema": object_schema({"pattern": string_schema(nonempty=True), "path": string_schema(".")},
+               ["pattern"]), "risky": False, "description": "Search the workspace."},
+    "run_shell": {"schema": object_schema({"command": string_schema(nonempty=True),
+                  "timeout": integer_schema(20, maximum=120)}, ["command"]), "risky": True,
+                  "description": "Run a shell command in the repo root."},
+    "write_file": {"schema": object_schema({"path": string_schema(nonempty=True), "content": string_schema()},
+                   ["path", "content"]), "risky": True, "description": "Write a text file."},
+    "patch_file": {"schema": object_schema({"path": string_schema(nonempty=True),
+                   "old_text": string_schema(nonempty=True), "new_text": string_schema()},
+                   ["path", "old_text", "new_text"]), "risky": True,
+                   "description": "Replace one exact text block in a file."},
 }
+DELEGATE_TOOL_SPEC = {"schema": object_schema({"task": string_schema(nonempty=True), "max_steps": integer_schema(3)},
+                      ["task"]), "risky": False, "description": "Ask a bounded read-only child agent to investigate."}
+
+
+def validate_arguments(schema, args):
+    if not isinstance(args, dict):
+        raise ValueError("arguments must be an object")
+    for name in schema["required"]:
+        if name not in args:
+            raise ValueError(f"missing required argument: {name}")
+    for name, value in args.items():
+        spec = schema["properties"].get(name)
+        if spec is None:
+            raise ValueError(f"unknown argument: {name}")
+        if spec["type"] == "string":
+            if not isinstance(value, str):
+                raise ValueError(f"{name} must be a string")
+            if spec.get("minLength") and not value.strip():
+                raise ValueError(f"{name} must not be empty")
+        elif spec["type"] == "integer":
+            if type(value) is not int:
+                raise ValueError(f"{name} must be an integer")
+            if value < spec.get("minimum", value) or value > spec.get("maximum", value):
+                raise ValueError(f"{name} is outside the allowed range")
 
 
 def legal_tool_names():
     return set(BASE_TOOL_SPECS) | {"delegate"}
 
-TOOL_EXAMPLES = {
-    "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-    "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-    "search": '<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
-    "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-    "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-    "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-    "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
-}
 
 
 def build_tool_registry(context):
@@ -79,12 +93,11 @@ def build_tool_registry(context):
     return tools
 
 
-def tool_example(name):
-    return TOOL_EXAMPLES.get(name, "")
-
-
 def validate_tool(context, name, args):
-    args = args or {}
+    spec = BASE_TOOL_SPECS.get(name, DELEGATE_TOOL_SPEC if name == "delegate" else None)
+    if spec is None:
+        raise ValueError(f"unknown tool: {name}")
+    validate_arguments(spec["schema"], args)
 
     if name == "list_files":
         path = context.path(args.get("path", "."))
@@ -164,7 +177,7 @@ def tool_list_files(context, args):
     for entry in entries[:200]:
         kind = "[D]" if entry.is_dir() else "[F]"
         lines.append(f"{kind} {entry.relative_to(context.root)}")
-    return "\n".join(lines) or "(empty)"
+    return {"text": "\n".join(lines) or "(empty)", "path": str(path.relative_to(context.root))}
 
 
 def tool_read_file(context, args):
@@ -177,7 +190,7 @@ def tool_read_file(context, args):
         raise ValueError("invalid line range")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
-    return f"# {path.relative_to(context.root)}\n{body}"
+    return {"text": f"# {path.relative_to(context.root)}\n{body}", "path": str(path.relative_to(context.root)), "start": start, "end": end}
 
 
 def tool_search(context, args):
@@ -194,7 +207,9 @@ def tool_search(context, args):
             capture_output=True,
             text=True,
         )
-        return result.stdout.strip() or result.stderr.strip() or "(no matches)"
+        if result.returncode not in (0, 1):
+            raise ValueError(result.stderr.strip() or "search failed")
+        return {"text": result.stdout.strip() or "(no matches)"}
 
     matches = []
     files = [path] if path.is_file() else [
@@ -206,8 +221,8 @@ def tool_search(context, args):
             if pattern.lower() in line.lower():
                 matches.append(f"{file_path.relative_to(context.root)}:{number}:{line}")
                 if len(matches) >= 200:
-                    return "\n".join(matches)
-    return "\n".join(matches) or "(no matches)"
+                    return {"text": "\n".join(matches), "truncated": True}
+    return {"text": "\n".join(matches) or "(no matches)", "truncated": False}
 
 
 def tool_run_shell(context, args):
@@ -228,15 +243,8 @@ def tool_run_shell(context, args):
         # 目的是减少敏感信息被意外带进命令执行环境的风险。
         env=context.shell_env(),
     )
-    return textwrap.dedent(
-        f"""\
-        exit_code: {result.returncode}
-        stdout:
-        {result.stdout.strip() or "(empty)"}
-        stderr:
-        {result.stderr.strip() or "(empty)"}
-        """
-    ).strip()
+    return {"exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr,
+            "stdout_truncated": False, "stderr_truncated": False, "timed_out": False, "cancelled": False}
 
 
 def tool_write_file(context, args):
@@ -244,7 +252,7 @@ def tool_write_file(context, args):
     content = str(args["content"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    return f"wrote {path.relative_to(context.root)} ({len(content)} chars)"
+    return {"text": f"wrote {path.relative_to(context.root)} ({len(content)} chars)", "path": str(path.relative_to(context.root)), "chars": len(content)}
 
 
 def tool_patch_file(context, args):
@@ -261,7 +269,7 @@ def tool_patch_file(context, args):
     if count != 1:
         raise ValueError(f"old_text must occur exactly once, found {count}")
     path.write_text(text.replace(old_text, str(args["new_text"]), 1), encoding="utf-8")
-    return f"patched {path.relative_to(context.root)}"
+    return {"text": f"patched {path.relative_to(context.root)}", "path": str(path.relative_to(context.root))}
 
 
 def tool_delegate(context, args):
@@ -270,7 +278,7 @@ def tool_delegate(context, args):
     task = str(args.get("task", "")).strip()
     if not task:
         raise ValueError("task must not be empty")
-    return context.spawn_delegate(args)
+    return {"text": context.spawn_delegate(args)}
 
 
 _TOOL_RUNNERS = {

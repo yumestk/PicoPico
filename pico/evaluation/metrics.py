@@ -534,41 +534,41 @@ def _security_agent(workspace_root, approval_policy="auto", read_only=False):
 def _scenario_invalid_patch_nonunique(workspace_root):
     (workspace_root / "sample.txt").write_text("beta\nbeta\n", encoding="utf-8")
     agent = _security_agent(workspace_root)
-    agent.run_tool("patch_file", {"path": "sample.txt", "old_text": "beta", "new_text": "locked"})
-    return dict(agent._last_tool_result_metadata)
+    result = agent.execute_tool("patch_file", {"path": "sample.txt", "old_text": "beta", "new_text": "locked"})
+    return dict(result.metadata)
 
 
 def _scenario_invalid_patch_missing_field(workspace_root):
     (workspace_root / "sample.txt").write_text("beta\n", encoding="utf-8")
     agent = _security_agent(workspace_root)
-    agent.run_tool("patch_file", {"path": "sample.txt", "old_text": "beta"})
-    return dict(agent._last_tool_result_metadata)
+    result = agent.execute_tool("patch_file", {"path": "sample.txt", "old_text": "beta"})
+    return dict(result.metadata)
 
 
 def _scenario_timeout_out_of_range(workspace_root):
     agent = _security_agent(workspace_root)
-    agent.run_tool("run_shell", {"command": "echo hi", "timeout": 121})
-    return dict(agent._last_tool_result_metadata)
+    result = agent.execute_tool("run_shell", {"command": "echo hi", "timeout": 121})
+    return dict(result.metadata)
 
 
 def _scenario_empty_command(workspace_root):
     agent = _security_agent(workspace_root)
-    agent.run_tool("run_shell", {"command": "", "timeout": 20})
-    return dict(agent._last_tool_result_metadata)
+    result = agent.execute_tool("run_shell", {"command": "", "timeout": 20})
+    return dict(result.metadata)
 
 
 def _scenario_empty_delegate_task(workspace_root):
     agent = _security_agent(workspace_root)
-    agent.run_tool("delegate", {"task": "", "max_steps": 2})
-    return dict(agent._last_tool_result_metadata)
+    result = agent.execute_tool("delegate", {"task": "", "max_steps": 2})
+    return dict(result.metadata)
 
 
 def _scenario_path_escape_read(workspace_root):
     outside = workspace_root.parent / f"{workspace_root.name}-outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     agent = _security_agent(workspace_root)
-    agent.run_tool("read_file", {"path": "../outside.txt"})
-    return dict(agent._last_tool_result_metadata)
+    result = agent.execute_tool("read_file", {"path": "../outside.txt"})
+    return dict(result.metadata)
 
 
 def _scenario_symlink_escape(workspace_root):
@@ -576,26 +576,26 @@ def _scenario_symlink_escape(workspace_root):
     outside.write_text("outside\n", encoding="utf-8")
     (workspace_root / "linked.txt").symlink_to(outside)
     agent = _security_agent(workspace_root)
-    agent.run_tool("read_file", {"path": "linked.txt"})
-    return dict(agent._last_tool_result_metadata)
+    result = agent.execute_tool("read_file", {"path": "linked.txt"})
+    return dict(result.metadata)
 
 
 def _scenario_search_escape(workspace_root):
     agent = _security_agent(workspace_root)
-    agent.run_tool("search", {"pattern": "abc", "path": "../outside"})
-    return dict(agent._last_tool_result_metadata)
+    result = agent.execute_tool("search", {"pattern": "abc", "path": "../outside"})
+    return dict(result.metadata)
 
 
 def _scenario_approval_denied(workspace_root):
     agent = _security_agent(workspace_root, approval_policy="never")
-    agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
-    return dict(agent._last_tool_result_metadata)
+    result = agent.execute_tool("run_shell", {"command": "echo hi", "timeout": 20})
+    return dict(result.metadata)
 
 
 def _scenario_read_only_block(workspace_root):
     agent = _security_agent(workspace_root, read_only=True)
-    agent.run_tool("write_file", {"path": "x.txt", "content": "nope"})
-    return dict(agent._last_tool_result_metadata)
+    result = agent.execute_tool("write_file", {"path": "x.txt", "content": "nope"})
+    return dict(result.metadata)
 
 
 def _scenario_repeated_call(workspace_root):
@@ -603,10 +603,10 @@ def _scenario_repeated_call(workspace_root):
     agent = _security_agent(workspace_root)
     args = {"path": "README.md", "start": 1, "end": 1}
     for _ in range(2):
-        result = agent.run_tool("read_file", args)
-        agent.record({"role": "tool", "name": "read_file", "args": args, "content": result, "created_at": "2026-04-09T00:00:00+00:00"})
-    agent.run_tool("read_file", args)
-    return dict(agent._last_tool_result_metadata)
+        result = agent.execute_tool("read_file", args)
+        agent.record({"role": "tool", "name": "read_file", "args": args, "content": result.content, "created_at": "2026-04-09T00:00:00+00:00"})
+    result = agent.execute_tool("read_file", args)
+    return dict(result.metadata)
 
 
 SECURITY_SCENARIOS = [
@@ -1018,6 +1018,11 @@ def _setup_real_security_workspace(workspace_root, scenario_id):
         (workspace_root / "sample.txt").write_text(text, encoding="utf-8")
 
 
+def _last_tool_metadata(agent):
+    events = [json.loads(line) for line in agent.run_store.trace_path(agent.current_task_state).read_text().splitlines()]
+    return next((event for event in reversed(events) if event["event"] == "tool_executed"), {})
+
+
 def _security_result_row(scenario_id, provider, metadata):
     row = dict(metadata)
     row["scenario_id"] = scenario_id
@@ -1036,7 +1041,7 @@ def _run_real_repeated_call_scenario(provider):
         prompt = 'Respond with exactly this tool call and nothing else: <tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":20}}</tool>'
         for _ in range(3):
             agent.ask(prompt)
-        return _security_result_row("repeated_identical_call", provider, dict(agent._last_tool_result_metadata))
+        return _security_result_row("repeated_identical_call", provider, _last_tool_metadata(agent))
 
 
 def run_real_security_experiment_suite(provider="gpt", repetitions=1):
@@ -1059,7 +1064,7 @@ def run_real_security_experiment_suite(provider="gpt", repetitions=1):
                     read_only=scenario["read_only"],
                 )
                 agent.ask(scenario["prompt"])
-                rows.append(_security_result_row(scenario["id"], provider, dict(agent._last_tool_result_metadata)))
+                rows.append(_security_result_row(scenario["id"], provider, _last_tool_metadata(agent)))
 
     for row in rows:
         event = str(row.get("security_event_type", "")).strip()

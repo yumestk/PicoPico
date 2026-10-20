@@ -1,15 +1,6 @@
 """Structured tool execution for the agent runtime."""
 
-from dataclasses import dataclass
-import re
-
-from .workspace import clip
-
-
-@dataclass(frozen=True)
-class ToolExecutionResult:
-    content: str
-    metadata: dict
+from .tool_result import ToolExecutionResult
 
 
 def _metadata(
@@ -46,7 +37,7 @@ class ToolExecutor:
         agent = self.agent
         if agent.allowed_tools is not None and name not in agent.allowed_tools:
             return ToolExecutionResult(
-                content=f"error: tool '{name}' is not allowed in this run",
+                message=f"tool '{name}' is not allowed in this run", status="rejected", error_code="tool_not_allowed",
                 metadata=_metadata(
                     "rejected",
                     tool_error_code="tool_not_allowed",
@@ -58,7 +49,7 @@ class ToolExecutor:
         tool = agent.tools.get(name)
         if tool is None:
             return ToolExecutionResult(
-                content=f"error: unknown tool '{name}'",
+                message=f"unknown tool '{name}'", status="rejected", error_code="unknown_tool",
                 metadata=_metadata(
                     "rejected",
                     tool_error_code="unknown_tool",
@@ -70,13 +61,10 @@ class ToolExecutor:
         try:
             agent.validate_tool(name, args)
         except Exception as exc:
-            example = agent.tool_example(name)
-            message = f"error: invalid arguments for {name}: {exc}"
-            if example:
-                message += f"\nexample: {example}"
+            message = f"invalid arguments for {name}: {exc}"
             security_event_type = "path_escape" if "path escapes workspace" in str(exc) else ""
             return ToolExecutionResult(
-                content=message,
+                message=message, status="rejected", error_code="invalid_arguments",
                 metadata=_metadata(
                     "rejected",
                     tool_error_code="invalid_arguments",
@@ -88,7 +76,7 @@ class ToolExecutor:
 
         if agent.repeated_tool_call(name, args):
             return ToolExecutionResult(
-                content=f"error: repeated identical tool call for {name}; choose a different tool or return a final answer",
+                message=f"repeated identical tool call for {name}; choose a different tool or return a final answer", status="rejected", error_code="repeated_identical_call",
                 metadata=_metadata(
                     "rejected",
                     tool_error_code="repeated_identical_call",
@@ -99,7 +87,7 @@ class ToolExecutor:
 
         if tool["risky"] and not agent.approve(name, args):
             return ToolExecutionResult(
-                content=f"error: approval denied for {name}",
+                message=f"approval denied for {name}", status="rejected", error_code="approval_denied",
                 metadata=_metadata(
                     "rejected",
                     tool_error_code="approval_denied",
@@ -112,22 +100,20 @@ class ToolExecutor:
         before_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else {}
         after_snapshot = before_snapshot
         try:
-            content = clip(tool["run"](args))
+            data = tool["run"](args)
             after_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else before_snapshot
             affected_paths, diff_summary = agent.diff_workspace_snapshots(before_snapshot, after_snapshot)
             workspace_changed = bool(affected_paths)
             tool_status = "ok"
             tool_error_code = ""
             if name == "run_shell":
-                match = re.search(r"exit_code:\s*(-?\d+)", content)
-                exit_code = int(match.group(1)) if match else 0
+                exit_code = data["exit_code"]
                 if exit_code != 0 and workspace_changed:
                     tool_status = "partial_success"
                     tool_error_code = "tool_partial_success"
                 elif exit_code != 0:
                     tool_status = "error"
                     tool_error_code = "tool_failed"
-            agent.update_memory_after_tool(name, args, content)
             metadata = _metadata(
                 tool_status,
                 tool_error_code=tool_error_code,
@@ -139,7 +125,9 @@ class ToolExecutor:
                 diff_summary=diff_summary,
             )
             agent.record_process_note_for_tool(name, metadata)
-            return ToolExecutionResult(content=content, metadata=metadata)
+            result = ToolExecutionResult(data=data, status=tool_status, error_code=tool_error_code, metadata=metadata)
+            agent.update_memory_after_tool(name, args, result.content)
+            return result
         except Exception as exc:
             after_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else before_snapshot
             affected_paths, diff_summary = agent.diff_workspace_snapshots(before_snapshot, after_snapshot)
@@ -157,4 +145,4 @@ class ToolExecutor:
                 diff_summary=diff_summary,
             )
             agent.record_process_note_for_tool(name, metadata)
-            return ToolExecutionResult(content=f"error: tool {name} failed: {exc}", metadata=metadata)
+            return ToolExecutionResult(message=f"tool {name} failed: {exc}", status=metadata["tool_status"], error_code=metadata["tool_error_code"], metadata=metadata)

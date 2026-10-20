@@ -26,7 +26,7 @@ def test_allowed_tools_filter_prompt_and_reject_direct_execution(tmp_path):
 
     assert "- read_file(" in prompt
     assert "- run_shell(" not in prompt
-    assert agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20}) == "error: tool 'run_shell' is not allowed in this run"
+    assert agent.execute_tool("run_shell", {"command": "echo hi", "timeout": 20}).content == "error: tool 'run_shell' is not allowed in this run"
 
 
 def test_allowed_tools_reject_unknown_tool_at_construction(tmp_path):
