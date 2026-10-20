@@ -124,6 +124,10 @@ class ToolExecutor:
                 workspace_fingerprint=agent.workspace.fingerprint(),
                 diff_summary=diff_summary,
             )
+            if name == "run_shell" and (data.get("cancelled") or data.get("timed_out")):
+                tool_status = "cancelled" if data.get("cancelled") else "timed_out"
+                tool_error_code = "tool_cancelled" if data.get("cancelled") else "tool_timeout"
+                metadata.update(tool_status=tool_status, tool_error_code=tool_error_code)
             agent.record_process_note_for_tool(name, metadata)
             result = ToolExecutionResult(data=data, status=tool_status, error_code=tool_error_code, metadata=metadata)
             agent.update_memory_after_tool(name, args, result.content)

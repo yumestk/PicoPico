@@ -9,6 +9,7 @@ import subprocess
 from functools import partial
 
 from .workspace import IGNORED_PATH_NAMES
+from .command_runner import run_command
 
 def object_schema(properties, required=()):
     return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
@@ -232,19 +233,8 @@ def tool_run_shell(context, args):
     timeout = int(args.get("timeout", 20))
     if timeout < 1 or timeout > 120:
         raise ValueError("timeout must be in [1, 120]")
-    result = subprocess.run(
-        command,
-        cwd=context.root,
-        shell=True,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        # 这里传入的是过滤后的环境变量，而不是直接继承整个父 shell 环境，
-        # 目的是减少敏感信息被意外带进命令执行环境的风险。
-        env=context.shell_env(),
-    )
-    return {"exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr,
-            "stdout_truncated": False, "stderr_truncated": False, "timed_out": False, "cancelled": False}
+    return run_command(command, context.root, context.shell_env(), timeout=timeout,
+                       cancel_event=getattr(context, 'cancel_event', None))
 
 
 def tool_write_file(context, args):
