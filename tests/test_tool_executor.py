@@ -1,8 +1,8 @@
+import pytest
+
 from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
 from pico.tool_executor import ToolExecutor
 from pico.tool_result import ToolExecutionResult
-
-import pytest
 
 
 def build_agent(tmp_path):

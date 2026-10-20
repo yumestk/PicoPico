@@ -1,6 +1,7 @@
 """Serializable run events; persistence is authoritative, observers are optional."""
 
 import copy
+import logging
 
 from .workspace import now
 
@@ -22,7 +23,6 @@ def emit(agent, task_state, name, payload):
     if agent.event_handler is not None:
         try:
             agent.event_handler(copy.deepcopy(event))
-        except Exception:
-            # An observer cannot invalidate a recorded execution fact.
-            pass
+        except Exception as exc:  # noqa: BLE001 - observers cannot invalidate recorded execution
+            logging.getLogger(__name__).warning("Event observer failed (%s)", type(exc).__name__)
     return event

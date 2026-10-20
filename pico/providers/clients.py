@@ -9,6 +9,18 @@ from http.client import RemoteDisconnected
 from .types import ModelProtocolError, ModelRequest, ModelResponse, ToolCall
 
 
+def _blocks(value):
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise ModelProtocolError("Provider content blocks must be objects in an array")
+    return value
+
+
+def _text(value):
+    if not isinstance(value, str):
+        raise ModelProtocolError("Provider text must be a string")
+    return value
+
+
 def _arguments(value):
     if isinstance(value, str):
         try:
@@ -20,7 +32,11 @@ def _arguments(value):
 
 def _usage(data):
     usage = data.get('usage') or {}
+    if not isinstance(usage, dict):
+        raise ModelProtocolError('Provider usage must be an object')
     details = usage.get('input_tokens_details') or usage.get('prompt_tokens_details') or {}
+    if not isinstance(details, dict):
+        raise ModelProtocolError('Provider token details must be an object')
     cached = int(details.get('cached_tokens') or usage.get('cache_read_input_tokens') or 0)
     return {'input_tokens': usage.get('input_tokens', usage.get('prompt_tokens')),
             'output_tokens': usage.get('output_tokens', usage.get('completion_tokens')),
@@ -58,6 +74,8 @@ def _post(url, payload, headers, timeout):
                     event = json.loads(line[5:])
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(event, dict):
+                    raise ModelProtocolError('SSE event must be an object')
                 if event.get('type') == 'response.completed':
                     data = event.get('response')
                 if event.get('type') in {'response.failed', 'error'}:
@@ -72,6 +90,7 @@ def _post(url, payload, headers, timeout):
 
 
 def _validate_response(response):
+    _text(response.text)
     ids = [call.id for call in response.tool_calls]
     if any(not isinstance(call_id, str) or not call_id for call_id in ids) or len(ids) != len(set(ids)):
         raise ModelProtocolError('Missing or duplicate tool call ID')
@@ -116,7 +135,7 @@ class OllamaModelClient:
                 messages.append(message.get('provider_blocks', [])[0] if message.get('provider_blocks') else
                                 {'role': 'assistant', 'content': message['content'], 'tool_calls': [
                                     {'function': {'name': c['name'], 'arguments': c['arguments']}}
-                                    for c in message.get('tool_calls', [])]})
+                                    for c in _blocks(message.get('tool_calls', []))]})
             elif message['role'] == 'tool':
                 messages.append({'role': 'tool', 'tool_name': message['name'], 'content': message['content']})
             else:
@@ -128,8 +147,12 @@ class OllamaModelClient:
         message = data.get('message')
         if not isinstance(message, dict) or not data.get('done', False):
             raise ModelProtocolError('Ollama returned an incomplete chat response')
-        calls = [ToolCall(c.get('function', {}).get('name'), _arguments(c.get('function', {}).get('arguments')))
-                 for c in message.get('tool_calls', [])]
+        calls = []
+        for call in _blocks(message.get('tool_calls', [])):
+            function = call.get('function')
+            if not isinstance(function, dict):
+                raise ModelProtocolError('Ollama tool call must contain a function object')
+            calls.append(ToolCall(function.get('name'), _arguments(function.get('arguments'))))
         reason = 'length' if data.get('done_reason') == 'length' else 'tool_calls' if calls else 'stop'
         return _validate_response(ModelResponse(text=message.get('content', ''), tool_calls=calls, finish_reason=reason,
                              usage={'input_tokens': data.get('prompt_eval_count'), 'output_tokens': data.get('eval_count')},
@@ -141,7 +164,7 @@ class OpenAICompatibleModelClient:
 
     def __init__(self, model, base_url, api_key, temperature, timeout):
         self.model, self.base_url = model, base_url.rstrip('/')
-        self.api_key, self.temperature, self.timeout = api_key, temperature, timeout
+        self.api_key, self.temperature, self.timeout = api_key or "", temperature, timeout
         self.supports_prompt_cache = any(host in self.base_url for host in ('openai.com', 'right.codes'))
 
     def complete(self, request):
@@ -169,19 +192,17 @@ class OpenAICompatibleModelClient:
             payload['prompt_cache_key'] = request.prompt_cache_key
             payload['prompt_cache_retention'] = 'in_memory'
         data = _post(self.base_url + '/responses', payload, {'Authorization': 'Bearer ' + self.api_key} if self.api_key else {}, self.timeout)
-        blocks = data.get('output', [])
-        if not isinstance(blocks, list):
-            raise ModelProtocolError('Responses output must be an array')
+        blocks = _blocks(data.get('output', []))
         calls, texts, refused = [], [], False
         for block in blocks:
             if block.get('type') == 'function_call':
                 calls.append(ToolCall(block.get('name'), _arguments(block.get('arguments')), block.get('call_id')))
             elif block.get('type') == 'message':
-                for part in block.get('content', []):
+                for part in _blocks(block.get('content', [])):
                     if part.get('type') == 'output_text':
-                        texts.append(part.get('text', ''))
+                        texts.append(_text(part.get('text', '')))
                     elif part.get('type') == 'refusal':
-                        texts.append(part.get('refusal', ''))
+                        texts.append(_text(part.get('refusal', '')))
                         refused = True
         status = data.get('status', 'completed')
         reason = 'refusal' if refused else 'tool_calls' if calls else 'stop'
@@ -201,7 +222,7 @@ class AnthropicCompatibleModelClient:
         self.base_url = base_url.rstrip('/')
         if not self.base_url.endswith('/v1'):
             self.base_url += '/v1'
-        self.api_key, self.temperature, self.timeout = api_key, temperature, timeout
+        self.api_key, self.temperature, self.timeout = api_key or "", temperature, timeout
         self.thinking = dict(thinking) if thinking else None
 
     def complete(self, request):
@@ -211,7 +232,7 @@ class AnthropicCompatibleModelClient:
                 blocks = message.get('provider_blocks') or (
                     ([{'type': 'text', 'text': message['content']}] if message['content'] else []) +
                     [{'type': 'tool_use', 'id': c['id'], 'name': c['name'], 'input': c['arguments']}
-                     for c in message.get('tool_calls', [])])
+                     for c in _blocks(message.get('tool_calls', []))])
                 messages.append({'role': 'assistant', 'content': blocks})
             elif message['role'] == 'tool':
                 block = {'type': 'tool_result', 'tool_use_id': message['call_id'], 'content': message['content'],
@@ -231,10 +252,8 @@ class AnthropicCompatibleModelClient:
         if self.thinking is not None:
             payload['thinking'] = self.thinking
         data = _post(self.base_url + '/messages', payload, {'x-api-key': self.api_key, 'anthropic-version': '2023-06-01'}, self.timeout)
-        blocks = data.get('content', [])
-        if not isinstance(blocks, list):
-            raise ModelProtocolError('Messages content must be an array')
-        texts = [b.get('text', '') for b in blocks if b.get('type') == 'text']
+        blocks = _blocks(data.get('content', []))
+        texts = [_text(b.get('text', '')) for b in blocks if b.get('type') == 'text']
         calls = [ToolCall(b.get('name'), b.get('input'), b.get('id')) for b in blocks if b.get('type') == 'tool_use']
         reason = {'end_turn': 'stop', 'tool_use': 'tool_calls', 'max_tokens': 'length',
                   'refusal': 'refusal', 'stop_sequence': 'stop'}.get(data.get('stop_reason'), 'protocol_error')

@@ -4,7 +4,11 @@ from unittest.mock import patch
 
 import pytest
 
-from pico.providers.clients import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
+from pico.providers.clients import (
+    AnthropicCompatibleModelClient,
+    OllamaModelClient,
+    OpenAICompatibleModelClient,
+)
 from pico.providers.types import ModelProtocolError, ModelRequest
 from pico.tools import BASE_TOOL_SPECS
 
@@ -123,4 +127,17 @@ def test_responses_complete_sse_preserves_tool_calls():
 @pytest.mark.parametrize('kind', ['messages', 'responses', 'ollama'])
 def test_backend_errors_not_interpreted_as_final_text(kind):
     with patch('urllib.request.urlopen', return_value=Response({'error': 'tools unsupported'})), pytest.raises(RuntimeError, match='unsupported'):
+        client(kind).complete(request())
+
+
+@pytest.mark.parametrize('kind', ['messages', 'responses', 'ollama'])
+def test_malformed_blocks_raise_a_protocol_error(kind):
+    value = payload(kind, calls=True)
+    if kind == 'messages':
+        value['content'] = [42]
+    elif kind == 'responses':
+        value['output'] = [42]
+    else:
+        value['message']['tool_calls'] = [42]
+    with patch('urllib.request.urlopen', return_value=Response(value)), pytest.raises(ModelProtocolError):
         client(kind).complete(request())

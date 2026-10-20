@@ -1,5 +1,7 @@
 """Structured tool execution for the agent runtime."""
 
+import time
+
 from .tool_result import ToolExecutionResult
 
 
@@ -35,6 +37,7 @@ class ToolExecutor:
 
     def execute(self, name, args):
         agent = self.agent
+        started = time.monotonic()
         if agent.cancel_event.is_set():
             return ToolExecutionResult(status="cancelled", error_code="tool_cancelled", message="Run cancelled before tool execution")
         if agent.allowed_tools is not None and name not in agent.allowed_tools:
@@ -101,6 +104,8 @@ class ToolExecutor:
 
         before_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else {}
         after_snapshot = before_snapshot
+        if agent.cancel_event.is_set():
+            return ToolExecutionResult(status="cancelled", error_code="tool_cancelled", message="Run cancelled before tool execution")
         try:
             data = tool["run"](args)
             after_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else before_snapshot
@@ -130,6 +135,7 @@ class ToolExecutor:
                 tool_status = "cancelled" if data.get("cancelled") else "timed_out"
                 tool_error_code = "tool_cancelled" if data.get("cancelled") else "tool_timeout"
                 metadata.update(tool_status=tool_status, tool_error_code=tool_error_code)
+            metadata["duration_ms"] = int((time.monotonic() - started) * 1000)
             agent.record_process_note_for_tool(name, metadata)
             result = ToolExecutionResult(data=data, status=tool_status, error_code=tool_error_code, metadata=metadata)
             agent.update_memory_after_tool(name, args, result.content)
@@ -150,5 +156,6 @@ class ToolExecutor:
                 workspace_fingerprint=agent.workspace.fingerprint(),
                 diff_summary=diff_summary,
             )
+            metadata["duration_ms"] = int((time.monotonic() - started) * 1000)
             agent.record_process_note_for_tool(name, metadata)
             return ToolExecutionResult(message=f"tool {name} failed: {exc}", status=metadata["tool_status"], error_code=metadata["tool_error_code"], metadata=metadata)

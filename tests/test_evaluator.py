@@ -1,14 +1,14 @@
 import json
-from pathlib import Path
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
 from pico.evaluation.evaluator import (
     BenchmarkEvaluator,
     load_benchmark,
-    run_harness_regression_v2,
     run_fixed_benchmark,
+    run_harness_regression_v2,
     summarize_rows,
 )
 

@@ -6,7 +6,6 @@ import signal
 import subprocess
 import time
 
-
 MAX_OUTPUT_BYTES = 64 * 1024
 
 

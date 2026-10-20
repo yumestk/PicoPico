@@ -1,10 +1,10 @@
-from pico.providers.types import ModelResponse, ToolCall
 import json
 
 import pytest
 
 from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
 from pico.evaluation.evaluator import BenchmarkEvaluator, validate_benchmark
+from pico.providers.types import ModelResponse
 
 
 def build_agent(tmp_path, allowed_tools=None):

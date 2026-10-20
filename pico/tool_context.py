@@ -1,8 +1,8 @@
 """Narrow context passed from runtime into tool functions."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 
 @dataclass

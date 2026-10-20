@@ -8,8 +8,9 @@ import shutil
 import subprocess
 from functools import partial
 
-from .workspace import IGNORED_PATH_NAMES
 from .command_runner import run_command
+from .workspace import IGNORED_PATH_NAMES
+
 
 def object_schema(properties, required=()):
     return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
@@ -55,7 +56,7 @@ DELEGATE_TOOL_SPEC = {"schema": object_schema({"task": string_schema(nonempty=Tr
 
 def validate_arguments(schema, args):
     if not isinstance(args, dict):
-        raise ValueError("arguments must be an object")
+        raise TypeError("arguments must be an object")
     for name in schema["required"]:
         if name not in args:
             raise ValueError(f"missing required argument: {name}")

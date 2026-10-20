@@ -21,3 +21,14 @@ def test_session_store_latest_is_none_when_empty(tmp_path):
     store = SessionStore(tmp_path / ".pico" / "sessions")
 
     assert store.latest() is None
+
+
+def test_session_atomic_write_preserves_previous_file_on_serialization_failure(tmp_path):
+    import pytest
+
+    store = SessionStore(tmp_path)
+    store.save({'id': 'atomic', 'history': ['original']})
+    with pytest.raises(TypeError):
+        store.save({'id': 'atomic', 'history': [object()]})
+    assert store.load('atomic')['history'] == ['original']
+    assert not list(tmp_path.glob('*.tmp'))

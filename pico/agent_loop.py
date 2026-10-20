@@ -3,8 +3,8 @@
 import json
 import time
 
-from .events import PersistenceError
 from .checkpoint import CHECKPOINT_NONE_STATUS
+from .events import PersistenceError
 from .providers.types import ModelProtocolError
 from .task_state import TaskState
 from .tool_result import ToolExecutionResult
@@ -23,12 +23,13 @@ class AgentLoop:
         agent = self.agent
         if reason == 'final_answer_returned':
             state.finish_success(answer)
-            agent.promote_durable_memory(request, answer)
         elif reason in {'model_error', 'persistence_error'}:
             state.stop(reason, status='failed', final_answer=answer)
         else:
             state.stop(reason, status='cancelled' if reason == 'cancelled' else 'stopped', final_answer=answer)
         try:
+            if reason == 'final_answer_returned':
+                agent.promote_durable_memory(request, answer)
             message = response.message() if response is not None else {'role': 'assistant', 'content': answer}
             agent.record({**message, 'created_at': now()})
             checkpoint = agent.create_checkpoint(state, request, trigger=reason)
@@ -69,7 +70,7 @@ class AgentLoop:
         agent = self.agent
         content = json.dumps({'status': result.status, 'output': result.content, 'error_code': result.error_code}, ensure_ascii=False)
         agent.record({'role': 'tool', 'call_id': call.id, 'name': call.name, 'args': call.arguments,
-                      'content': content, 'result': result.to_dict(), 'created_at': now()})
+                      'content': content, 'status': result.status, 'result': result.to_dict(), 'created_at': now()})
         agent.emit_trace(state, 'tool_executed', {'call_id': call.id, 'name': call.name, 'args': call.arguments,
                                                 'result': clip(result.content, 500), **result.metadata,
                                                 'tool_status': result.status, 'tool_error_code': result.error_code})
@@ -95,7 +96,6 @@ class AgentLoop:
                 agent.run_store.write_task_state(state)
                 request, metadata = agent._build_prompt_and_metadata(user_message, allow_tools=not finalization)
                 if finalization:
-                    request.system += '\nTool budget exhausted. Summarize available evidence without further tools.'
                     metadata['finalization'] = True
                 agent.last_prompt_metadata = metadata
                 agent.emit_trace(state, 'prompt_built', {'prompt_metadata': metadata})

@@ -1,10 +1,10 @@
-from pico.providers.types import ModelResponse, ToolCall
 import json
 
 import pytest
 
 from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
 from pico.agent_loop import AgentLoop
+from pico.providers.types import ModelResponse, ToolCall
 
 
 def build_agent(tmp_path, outputs, **kwargs):

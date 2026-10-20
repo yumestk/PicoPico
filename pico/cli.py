@@ -13,7 +13,11 @@ import sys
 import textwrap
 
 from .config import load_project_env, provider_env
-from .providers.clients import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
+from .providers.clients import (
+    AnthropicCompatibleModelClient,
+    OllamaModelClient,
+    OpenAICompatibleModelClient,
+)
 from .runtime import Pico, SessionStore
 from .workspace import WorkspaceContext, middle
 
@@ -122,7 +126,7 @@ def _configured_secret_names(args):
 def _build_model_client(args):
     provider = _effective_provider(args)
     # CLI 只负责把 provider 选择翻译成具体 client。
-    # 真正的提示词格式、缓存支持、HTTP 协议差异，都封装在 models.py 里。
+    # 原生消息格式、工具声明和 HTTP 协议差异由 provider adapter 负责。
     if provider == "openai":
         model = _effective_model(args, provider)
         base_url = getattr(args, "base_url", None) or provider_env("PICO_OPENAI_API_BASE", ("OPENAI_API_BASE",), DEFAULT_OPENAI_BASE_URL)
@@ -161,9 +165,8 @@ def _build_model_client(args):
             api_key=api_key,
             temperature=args.temperature,
             timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
-            # Pico currently uses text-encoded tool calls and does not replay
-            # provider-native thinking blocks. Keep the default transport mode
-            # deterministic until that protocol is implemented end to end.
+            # Native blocks are replayed; retain the bounded non-thinking default
+            # while reasoning-mode budgets are outside this stage.
             thinking={"type": "disabled"},
         )
 
@@ -230,7 +233,7 @@ def display_event(event):
     elif name == 'tool_started':
         message = f"Using {event['name']}"
     elif name == 'tool_executed':
-        message = f"{event['name']}: {event['tool_status']}"
+        message = f"{event['name']}: {event['tool_status']} ({event.get('duration_ms', 0)} ms)"
     elif name == 'approval_requested':
         message = f"Waiting for approval: {event['name']}"
     elif name == 'run_finished':
@@ -376,7 +379,7 @@ def main(argv=None):
             print("\npico> ", file=sys.stderr, end="", flush=True)
             user_input = input().strip()
         except (EOFError, KeyboardInterrupt):
-            print("")
+            print(file=sys.stderr)
             return 0
 
         if not user_input:

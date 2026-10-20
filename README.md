@@ -18,6 +18,8 @@
 - 模块入口是 `python -m pico`
 - 会话保存在 `.pico/sessions/`
 - 每次运行的工件保存在 `.pico/runs/<run_id>/`
+- 模型通过原生工具调用执行任务，支持一轮多个调用，按顺序校验、审批和执行
+- 进度、工具状态与审批显示在 stderr，最终回答输出到 stdout；Ctrl+C 取消运行并保存现场
 - 支持四类模型后端：
   - Ollama
   - OpenAI 兼容 Responses API
@@ -135,7 +137,17 @@ uv run pico --model deepseek-v4-pro --base-url https://api.deepseek.com/anthropi
 
 DeepSeek 当前走 Anthropic-compatible Messages API，所以 runtime 里复用的是 Anthropic-compatible client；这只影响 HTTP 协议，不影响 CLI 用法。
 
-Pico 当前使用文本编码的工具协议，因此会在 DeepSeek 请求中显式关闭 provider-native thinking，避免思考内容耗尽单步输出预算或产生无法回放的 thinking block。后续如果接入原生工具协议，需要同时实现 thinking block 的完整回放，不能只删除这个开关。
+Pico 使用原生工具协议，并完整保存回放所需的 provider 响应块。DeepSeek 当前仍显式关闭 thinking，沿用有界的单步输出预算；这不影响原生工具调用。
+
+### 第一阶段的执行行为
+
+会话格式为 `native-v1`，记录 provider 协议身份。旧文本协议会话和不同协议的会话不能直接恢复，请新建会话；旧文件不会自动迁移或覆盖。上下文预算以字符计数，工具 schema 也计入预算；裁剪保留完整工具调用与结果，无法容纳必要消息时明确停止。
+
+shell 命令分别保留最多 64 KiB 的 stdout 和 stderr，同时持续排空管道；模型可见文本另有展示长度限制。超时或取消会清理 POSIX 进程组，当前验收平台为 macOS/POSIX。Windows 的进程树管理留待后续实现。
+
+运行中的工具失败、审批拒绝会作为结果交给模型继续判断；取消结束整次运行。`completed` 表示模型正常结束本次执行，独立的任务正确性仍由测试或 verifier 判断。
+
+开发者可向 `Pico` 注入 `approval_handler(name, args)`、`event_handler(event)` 和共享的 `threading.Event` 取消信号。事件先脱敏并写入 trace，再交给展示回调；展示异常不改变执行事实，持久化失败会阻止后续工具执行。接口及验收结果见 [第一阶段验收记录](docs/phase1-verification.md)，执行计划见 [PHASE1_PLAN.md](docs/PHASE1_PLAN.md)。
 
 ### 可选配置：right.codes
 

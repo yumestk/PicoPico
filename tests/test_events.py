@@ -9,8 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
-from pico import cli
+from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext, cli
 from pico.context_manager import message_groups
 from pico.events import PersistenceError
 from pico.providers.types import ModelResponse, ToolCall
@@ -87,6 +86,8 @@ def test_refused_approval_is_a_tool_result_not_run_cancellation(tmp_path):
     assert_terminal(agent, 'completed')
     decision = next(e for e in events(agent) if e['event'] == 'approval_resolved')
     assert decision['call_id'] == 'deny' and not decision['approved']
+    replayed = agent.model_client.requests[-1].messages
+    assert next(m for m in replayed if m['role'] == 'tool')['status'] == 'rejected'
 
 
 def test_cancel_signal_after_model_response_prevents_calls(tmp_path):
@@ -95,6 +96,18 @@ def test_cancel_signal_after_model_response_prevents_calls(tmp_path):
         agent.cancel_event.set()
         return ModelResponse(tool_calls=[ToolCall('write_file', {'path': 'no', 'content': 'no'})])
     agent.model_client.complete = complete
+    agent.ask('write')
+    assert_terminal(agent, 'cancelled')
+    assert not (tmp_path / 'no').exists()
+
+
+def test_cancel_signal_during_approval_prevents_an_approved_write(tmp_path):
+    agent = agent_at(tmp_path, [ModelResponse(tool_calls=[ToolCall('write_file', {'path': 'no', 'content': 'no'})])],
+                     approval_policy='ask')
+    def approve(*_):
+        agent.cancel_event.set()
+        return True
+    agent.approval_handler = approve
     agent.ask('write')
     assert_terminal(agent, 'cancelled')
     assert not (tmp_path / 'no').exists()
@@ -115,7 +128,8 @@ def test_trace_failure_prevents_tool_effects(tmp_path, monkeypatch):
     assert agent.current_task_state.stop_reason == 'persistence_error'
 
 
-def test_report_failure_cannot_leave_a_completed_terminal_event(tmp_path, monkeypatch):
+@pytest.mark.parametrize('point', ['report', 'memory'])
+def test_completion_persistence_failure_cannot_leave_a_completed_terminal_event(tmp_path, monkeypatch, point):
     agent = agent_at(tmp_path, [ModelResponse(text='Done')])
     write = agent.run_store.write_report
     count = 0
@@ -125,7 +139,12 @@ def test_report_failure_cannot_leave_a_completed_terminal_event(tmp_path, monkey
         if count == 1:
             raise OSError('report unavailable')
         return write(state, report)
-    monkeypatch.setattr(agent.run_store, 'write_report', fail_once)
+    if point == 'report':
+        monkeypatch.setattr(agent.run_store, 'write_report', fail_once)
+    else:
+        def fail_memory(*_):
+            raise OSError('memory unavailable')
+        monkeypatch.setattr(agent, 'promote_durable_memory', fail_memory)
     with pytest.raises(PersistenceError):
         agent.ask('answer')
     state = agent.current_task_state

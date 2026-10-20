@@ -4,10 +4,10 @@
 这份快照刻意保持小而稳定：主要包含 Git 事实和少量白名单项目文档。
 """
 
-import subprocess
-import textwrap
 import hashlib
 import json
+import subprocess
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -92,7 +92,7 @@ class WorkspaceContext:
             repo_root=str(repo_root),
             branch=git(["branch", "--show-current"], "-") or "-",
             default_branch=(
-                lambda branch: branch[len("origin/") :] if branch.startswith("origin/") else branch
+                lambda branch: branch.removeprefix("origin/")
             )(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main") or "origin/main"),
             status=clip(git(["status", "--short"], "clean") or "clean", 1500),
             recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],

@@ -1,11 +1,12 @@
-from pico.providers.types import ModelResponse, ToolCall
 import os
 import shlex
+import subprocess
 import sys
 from unittest.mock import patch
 
 from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
 from pico import cli as pico_cli
+from pico.providers.types import ModelResponse, ToolCall
 from pico.task_state import TaskState
 
 
@@ -34,6 +35,18 @@ def test_workspace_escape_is_rejected(tmp_path):
     result = agent.execute_tool("read_file", {"path": "../outside.txt"})
 
     assert "path escapes workspace" in result.content
+
+
+def test_prefix_refresh_preserves_the_declared_workspace_root(tmp_path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    root = tmp_path / 'nested'
+    root.mkdir()
+    workspace = WorkspaceContext.build(root, repo_root_override=root)
+    agent = Pico(FakeModelClient([]), workspace, SessionStore(root / '.pico/sessions'))
+    agent.refresh_prefix(force=True)
+    assert agent.root == root
+    assert agent.workspace.repo_root == str(root)
+    assert agent.session['workspace_root'] == str(root)
 
 
 def test_symlink_path_traversal_is_rejected(tmp_path):

@@ -6,8 +6,8 @@ session history 负责保存完整事件流；这个模块只保存更小的一�
 """
 
 import hashlib
-from datetime import datetime
 import re
+from datetime import datetime
 from pathlib import Path
 
 from ..workspace import clip, now
@@ -135,7 +135,7 @@ class DurableMemoryStore:
             r"^(.+?)使用.+$",
         )
         for pattern in patterns:
-            match = re.match(pattern, text, re.I)
+            match = re.match(pattern, text, re.IGNORECASE)
             if match:
                 subject = " ".join(_tokenize(match.group(1)))
                 return subject or None

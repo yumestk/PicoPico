@@ -36,6 +36,8 @@ def message_groups(history):
     index = 0
     while index < len(history):
         message = history[index]
+        if message.get("role") not in {"user", "assistant", "tool"}:
+            raise ModelProtocolError("Unsupported history message role")
         if message["role"] == "tool":
             raise ModelProtocolError("Orphan tool result in history")
         group = [message]
@@ -72,14 +74,15 @@ class ContextManager:
         notes = agent.memory.retrieval_candidates(user_message, limit=3) if memory_on and agent.feature_enabled("relevant_memory") else []
         checkpoint = agent.render_checkpoint_text()
         prefix = agent.prefix + ("\n\n" + checkpoint if checkpoint else "")
+        if not allow_tools:
+            prefix += "\nTool budget exhausted. Summarize evidence without further tools."
         memory = agent.memory_text() if memory_on else "Memory:\n- disabled"
         texts = {"prefix": prefix, "memory": memory}
         budgets = dict(self.section_budgets)
         history = copy.deepcopy(agent.session["history"])
-        if not history or history[-1].get("role") != "user" or history[-1].get("content") != user_message:
-            # During a tool round the current user message already exists further back.
-            if not any(m.get("role") == "user" and m.get("content") == user_message for m in history):
-                history.append({"role": "user", "content": user_message})
+        # During a tool round the current user message already exists further back.
+        if not any(m.get("role") == "user" and m.get("content") == user_message for m in history):
+            history.append({"role": "user", "content": user_message})
         groups = message_groups(history)
         groups = [[{k: v for k, v in m.items() if k in {"role", "content", "tool_calls", "provider_blocks", "protocol", "call_id", "name", "status"}} for m in group] for group in groups]
         current = max(i for i, group in enumerate(groups) if group[0]["role"] == "user" and group[0]["content"] == user_message)
@@ -134,7 +137,7 @@ class ContextManager:
         header = "Relevant memory:"
         note_texts = [str(note.get("text", "")) for note in selected_notes if str(note.get("text", "")).strip()]
         raw_lines = [header] + [f"- {text}" for text in note_texts]
-        raw = "\n".join(raw_lines) if note_texts else "\n".join([header, "- none"])
+        raw = "\n".join(raw_lines) if note_texts else f"{header}\n- none"
         if not note_texts:
             rendered = raw
             return SectionRender(
@@ -160,7 +163,7 @@ class ContextManager:
                 break
             per_note_budget -= 1
 
-        if len(rendered) > budget and budget > 0:
+        if len(rendered) > budget > 0:
             rendered = _tail_clip(raw, budget)
             rendered_notes = [rendered]
 

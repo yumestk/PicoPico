@@ -1,15 +1,20 @@
-from pico.providers.types import ModelResponse, ToolCall
 import json
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from pico.providers.types import ModelResponse, ToolCall
+
 from ..config import load_project_env, provider_env
-from .evaluator import run_fixed_benchmark
-from ..providers.clients import AnthropicCompatibleModelClient, FakeModelClient, OpenAICompatibleModelClient
+from ..providers.clients import (
+    AnthropicCompatibleModelClient,
+    FakeModelClient,
+    OpenAICompatibleModelClient,
+)
 from ..runtime import Pico, SessionStore
 from ..workspace import WorkspaceContext
+from .evaluator import run_fixed_benchmark
 
 METRICS_SCHEMA_VERSION = 2
 DEFAULT_HARNESS_REGRESSION_V2_PATH = Path("artifacts/harness-regression-v2.json")
@@ -690,7 +695,7 @@ def _provider_profile(provider):
             "provider": provider,
             "status": "ready",
             "model": provider_env("PICO_OPENAI_MODEL", ("OPENAI_MODEL",), "gpt-5.4"),
-            "base_url": provider_env("PICO_OPENAI_API_BASE", ("OPENAI_API_BASE",), "https://api.openai.com/v1"),
+            "base_url": provider_env("PICO_OPENAI_API_BASE", ("OPENAI_API_BASE",), "https://www.right.codes/codex/v1"),
             "api_key": api_key,
         }
     if provider == "deepseek":
@@ -738,6 +743,7 @@ def _make_provider_client(provider):
         api_key=profile["api_key"],
         temperature=0.0,
         timeout=timeout,
+        thinking={"type": "disabled"} if provider == "deepseek" else None,
     )
 
 
@@ -777,6 +783,7 @@ def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_
                     api_key=profile["api_key"],
                     temperature=0.0,
                     timeout=300,
+                    thinking={"type": "disabled"} if profile["provider"] == "deepseek" else None,
                 )
         artifact_path = artifact_root / f"{provider_name}-benchmark.json"
         try:

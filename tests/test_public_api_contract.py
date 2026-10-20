@@ -1,7 +1,15 @@
 from pathlib import Path
 
 import pico
-from pico import Pico, SessionStore, WorkspaceContext, build_agent, build_arg_parser, build_welcome, main
+from pico import (
+    Pico,
+    SessionStore,
+    WorkspaceContext,
+    build_agent,
+    build_arg_parser,
+    build_welcome,
+    main,
+)
 
 
 def test_public_api_exports_current_names_only():

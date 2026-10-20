@@ -4,28 +4,28 @@ Pico 就是包在模型外面的控制循环：负责组 prompt、解析模型�
 校验并执行工具、写 trace、更新工作记忆，以及在合适的时候停下来。
 """
 
-import json
 import hashlib
+import json
 import os
 import re
-import uuid
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 
-from . import events
 from . import checkpoint as checkpointlib
-from .features import memory as memorylib
+from . import events
 from . import security as securitylib
-from .context_manager import ContextManager
+from . import tools as toolkit
 from .checkpoint import CHECKPOINT_NONE_STATUS
+from .context_manager import ContextManager
+from .features import memory as memorylib
 from .prompt_prefix import build_prompt_prefix, tool_signature
 from .run_store import RunStore
 from .security import REDACTED_VALUE
 from .session_store import SessionStore
 from .tool_context import ToolContext
 from .tool_executor import ToolExecutor
-from . import tools as toolkit
 from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
 
 DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")
@@ -233,7 +233,7 @@ class Pico:
 
         # 工作区事实相对稳定，所以这里按整体刷新；
         # 只有这些事实真的变化了，才重建完整 prefix。
-        refreshed_workspace = WorkspaceContext.build(self.root)
+        refreshed_workspace = WorkspaceContext.build(self.root, repo_root_override=self.root)
         refreshed_workspace_fingerprint = refreshed_workspace.fingerprint()
         workspace_changed = force or refreshed_workspace_fingerprint != previous_workspace_fingerprint
         if workspace_changed:

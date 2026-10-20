@@ -1,24 +1,20 @@
-from pico.providers.types import ModelResponse, ToolCall
-import os
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 import pico as pico_pkg
 from pico import (
-    AnthropicCompatibleModelClient,
     FakeModelClient,
-    Pico,
     OllamaModelClient,
-    OpenAICompatibleModelClient,
+    Pico,
     SessionStore,
     WorkspaceContext,
     build_welcome,
 )
+from pico.providers.types import ModelResponse, ToolCall
 
 
 def build_workspace(tmp_path):
@@ -159,7 +155,6 @@ def test_agent_retries_after_malformed_tool_payload(tmp_path):
 
     assert answer == "Recovered after malformed tool output."
     assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
-    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
     errors = [item for item in agent.session["history"] if item["role"] == "tool"]
     assert errors[0]["result"]["error_code"] == "invalid_arguments"
 
@@ -350,14 +345,13 @@ def test_build_agent_uses_openai_provider_and_model_override(tmp_path):
             "OPENAI_MODEL": "env-model",
         },
         clear=False,
-    ):
-        with patch(
-            "pico.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch("pico.cli.OpenAICompatibleModelClient") as mock_openai:
-            fake_client = mock_openai.return_value
-            fake_client.protocol = "fake"
-            agent = pico_pkg.build_agent(args)
+    ), patch(
+        "pico.cli.OllamaModelClient",
+        side_effect=AssertionError("ollama client should not be used"),
+    ), patch("pico.cli.OpenAICompatibleModelClient") as mock_openai:
+        fake_client = mock_openai.return_value
+        fake_client.protocol = "fake"
+        agent = pico_pkg.build_agent(args)
 
     mock_openai.assert_called_once()
     assert mock_openai.call_args.kwargs["model"] == "override-model"
@@ -436,17 +430,16 @@ def test_build_agent_uses_project_env_provider_when_cli_omitted(tmp_path):
     )
     args = pico_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
 
-    with patch.dict(os.environ, {}, clear=True):
-        with patch(
-            "pico.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch(
-            "pico.cli.AnthropicCompatibleModelClient",
-            side_effect=AssertionError("deepseek client should not be used"),
-        ), patch("pico.cli.OpenAICompatibleModelClient") as mock_openai:
-            fake_client = mock_openai.return_value
-            fake_client.protocol = "fake"
-            agent = pico_pkg.build_agent(args)
+    with patch.dict(os.environ, {}, clear=True), patch(
+        "pico.cli.OllamaModelClient",
+        side_effect=AssertionError("ollama client should not be used"),
+    ), patch(
+        "pico.cli.AnthropicCompatibleModelClient",
+        side_effect=AssertionError("deepseek client should not be used"),
+    ), patch("pico.cli.OpenAICompatibleModelClient") as mock_openai:
+        fake_client = mock_openai.return_value
+        fake_client.protocol = "fake"
+        agent = pico_pkg.build_agent(args)
 
     mock_openai.assert_called_once()
     assert mock_openai.call_args.kwargs["model"] == "gpt-5.4"
@@ -473,17 +466,16 @@ def test_build_agent_prefers_cli_provider_over_project_env_provider(tmp_path):
         ["--cwd", str(tmp_path), "--provider", "deepseek"]
     )
 
-    with patch.dict(os.environ, {}, clear=True):
-        with patch(
-            "pico.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch(
-            "pico.cli.OpenAICompatibleModelClient",
-            side_effect=AssertionError("openai client should not be used"),
-        ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
-            fake_client = mock_anthropic.return_value
-            fake_client.protocol = "fake"
-            agent = pico_pkg.build_agent(args)
+    with patch.dict(os.environ, {}, clear=True), patch(
+        "pico.cli.OllamaModelClient",
+        side_effect=AssertionError("ollama client should not be used"),
+    ), patch(
+        "pico.cli.OpenAICompatibleModelClient",
+        side_effect=AssertionError("openai client should not be used"),
+    ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+        fake_client = mock_anthropic.return_value
+        fake_client.protocol = "fake"
+        agent = pico_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
@@ -520,17 +512,16 @@ def test_build_agent_uses_anthropic_provider_and_openai_key_fallback(tmp_path):
             "OPENAI_API_KEY": "sk-openai-fallback",
         },
         clear=True,
-    ):
-        with patch(
-            "pico.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch(
-            "pico.cli.OpenAICompatibleModelClient",
-            side_effect=AssertionError("openai client should not be used"),
-        ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
-            fake_client = mock_anthropic.return_value
-            fake_client.protocol = "fake"
-            agent = pico_pkg.build_agent(args)
+    ), patch(
+        "pico.cli.OllamaModelClient",
+        side_effect=AssertionError("ollama client should not be used"),
+    ), patch(
+        "pico.cli.OpenAICompatibleModelClient",
+        side_effect=AssertionError("openai client should not be used"),
+    ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+        fake_client = mock_anthropic.return_value
+        fake_client.protocol = "fake"
+        agent = pico_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "claude-sonnet-4-5-20250929"
@@ -598,17 +589,16 @@ def test_build_agent_uses_deepseek_provider_and_env_configuration(tmp_path):
             "OPENAI_API_KEY": "sk-openai",
         },
         clear=True,
-    ):
-        with patch(
-            "pico.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch(
-            "pico.cli.OpenAICompatibleModelClient",
-            side_effect=AssertionError("openai client should not be used"),
-        ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
-            fake_client = mock_anthropic.return_value
-            fake_client.protocol = "fake"
-            agent = pico_pkg.build_agent(args)
+    ), patch(
+        "pico.cli.OllamaModelClient",
+        side_effect=AssertionError("ollama client should not be used"),
+    ), patch(
+        "pico.cli.OpenAICompatibleModelClient",
+        side_effect=AssertionError("openai client should not be used"),
+    ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+        fake_client = mock_anthropic.return_value
+        fake_client.protocol = "fake"
+        agent = pico_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
@@ -640,17 +630,16 @@ def test_build_agent_uses_deepseek_provider_by_default(tmp_path):
             "DEEPSEEK_API_KEY": "sk-test",
         },
         clear=False,
-    ):
-        with patch(
-            "pico.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch(
-            "pico.cli.OpenAICompatibleModelClient",
-            side_effect=AssertionError("openai client should not be used"),
-        ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
-            fake_client = mock_anthropic.return_value
-            fake_client.protocol = "fake"
-            agent = pico_pkg.build_agent(args)
+    ), patch(
+        "pico.cli.OllamaModelClient",
+        side_effect=AssertionError("ollama client should not be used"),
+    ), patch(
+        "pico.cli.OpenAICompatibleModelClient",
+        side_effect=AssertionError("openai client should not be used"),
+    ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+        fake_client = mock_anthropic.return_value
+        fake_client.protocol = "fake"
+        agent = pico_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
