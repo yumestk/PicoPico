@@ -58,6 +58,7 @@ class HostClient:
         directory.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(
             [sys.executable, *(["-I"] if sys.flags.isolated else []),
+             *(["-B"] if sys.dont_write_bytecode else []),
              "-m", "pico.host", "--workspace", str(self.root)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

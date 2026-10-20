@@ -190,6 +190,16 @@ npm run package
 
 首版仅支持 macOS arm64 的本地内部试用，尚未签名公证；不包含桌面对话、审批或 Diff 面板。构建下载发生在打包阶段，Python 的来源与校验值见 `desktop/python-runtime.json`。运行 `npm run test:electron` 可验收真实应用窗口及断连后的 Host。
 
+### 运行差异与数据升级
+
+新运行会在取得执行槽后保存工作树基线，并在结束时保存冻结的文件差异。基线包含运行开始时你已有的修改，比较不以 HEAD 为起点；审查过程不修改 Git index，也不执行 stash/reset。外部编辑与工具可能交错，因此差异表示运行期间观察到的变化。
+
+`pico runs export <run_id>` 除执行记录外，还导出脱敏的 `review.json`、`changes.json` 和 `diffs.json`。Host 提供 `runs.review`、`runs.changes`、`runs.diff` 查询；桌面审查面板在后续节点接入。敏感文件、二进制、大文件、忽略项与采集失败都有明确范围/缺失提示，不能将没有 Diff 当作没有修改。
+
+首次使用新 Host 时，SQLite schema v1 会备份到 `.pico/backups/` 后事务升级到 v2；保留会话、审批、调用与事件。旧运行没有采集过的差异显示不可用，不从当前文件重建。旧 Host 不会被桌面自动强制重启；有活动任务时先完成或显式取消，再停止旧 Host，下一次连接启动新版。升级后的数据库供新版本使用，旧版本不能直接读取 v2。
+
+首版每文件最多捕获 512 KiB UTF-8 文本、每 Run 内容合计 32 MiB、每工作区内容合计 256 MiB；超过限制仍可运行任务，但审查证据标为不完整，不自动删除历史内容。
+
 ### 可选配置：right.codes
 
 right.codes 在 Pico 里有两条可选 provider 路径：

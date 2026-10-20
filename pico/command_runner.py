@@ -72,6 +72,8 @@ def run_command(
         process = subprocess.Popen(
             [
                 sys.executable,
+                *(["-I"] if sys.flags.isolated else []),
+                *(["-B"] if sys.dont_write_bytecode else []),
                 str(Path(__file__).resolve()),
                 "--guard",
                 str(control_read),

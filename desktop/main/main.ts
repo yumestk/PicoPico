@@ -21,7 +21,7 @@ function checkSender(event: Electron.IpcMainInvokeEvent) {
 async function openWorkspace(directory: string): Promise<Workspace> {
   const backend = app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.join(app.getAppPath(), 'runtime/backend');
   const python = path.join(backend, 'python/bin/python3');
-  const { stdout } = await execute(python, ['-I', '-m', 'pico.desktop_bootstrap', '--workspace', directory], {
+  const { stdout } = await execute(python, ['-I', '-B', '-m', 'pico.desktop_bootstrap', '--workspace', directory], {
     cwd: backend, timeout: 20000, maxBuffer: 65536,
     env: { ...process.env, SSL_CERT_FILE: path.join(backend, 'cacert.pem') },
   });

@@ -1,5 +1,6 @@
 """Workspace state and auditable transitions in one SQLite transaction boundary."""
 
+import base64
 import hashlib
 import json
 import os
@@ -14,7 +15,7 @@ from .security import redact_artifact
 from .workspace import now
 
 TERMINAL = frozenset({"completed", "stopped", "failed", "cancelled", "interrupted"})
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class ApplicationError(ValueError):
@@ -55,7 +56,7 @@ class StateStore:
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA synchronous=FULL")
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, SCHEMA_VERSION):
+        if version not in (0, 1, SCHEMA_VERSION):
             self.connection.close()
             raise ApplicationError(
                 "unsupported_schema", f"Unsupported state schema: {version}"
@@ -90,7 +91,10 @@ class StateStore:
                 CREATE TABLE events (
                     run_id TEXT NOT NULL REFERENCES runs(id), sequence INTEGER NOT NULL,
                     body TEXT NOT NULL, PRIMARY KEY(run_id,sequence));
-                PRAGMA user_version=1;
+                CREATE TABLE run_reviews (run_id TEXT PRIMARY KEY REFERENCES runs(id), body TEXT NOT NULL);
+                CREATE TABLE review_blobs (run_id TEXT NOT NULL REFERENCES runs(id), hash TEXT NOT NULL,
+                    body BLOB NOT NULL, PRIMARY KEY(run_id,hash));
+                PRAGMA user_version=2;
             """)
             self.connection.execute(
                 "INSERT INTO metadata VALUES (?)", (str(self.root),)
@@ -104,6 +108,27 @@ class StateStore:
             raise ApplicationError(
                 "workspace_mismatch", "State database belongs to another workspace"
             )
+        if version == 1:
+            try:
+                self._migrate_review_schema()
+            except BaseException:
+                self.connection.close()
+                raise
+
+    def _migrate_review_schema(self):
+        directory = self.path.parent / "backups"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        backup = directory / f"schema1-{identity('backup')}.sqlite3"
+        destination = sqlite3.connect(backup)
+        try:
+            os.chmod(backup, 0o600)
+            self.connection.backup(destination)
+        finally:
+            destination.close()
+        with self.transaction():
+            self.connection.execute("CREATE TABLE run_reviews (run_id TEXT PRIMARY KEY REFERENCES runs(id), body TEXT NOT NULL)")
+            self.connection.execute("CREATE TABLE review_blobs (run_id TEXT NOT NULL REFERENCES runs(id), hash TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(run_id,hash))")
+            self.connection.execute("PRAGMA user_version=2")
 
     def configured_secret_names(self):
         names = set()
@@ -729,6 +754,7 @@ class StateStore:
         return True
 
     def export_run(self, value):
+        self.get_run(value)
         root = self.root / ".pico" / "exports" / run_id(value)
         root.mkdir(parents=True, exist_ok=True)
         (root / "run_state.json").write_text(
@@ -754,4 +780,148 @@ class StateStore:
             )
         ]
         (root / "tool_results.json").write_text(encode(self.redact(calls)) + "\n")
+        review = self.review_get(value)
+        (root / "review.json").write_text(encode(review) + "\n")
+        rows = self.review_changes(value)
+        (root / "changes.json").write_text(encode(self.redact(rows)) + "\n")
+        diffs = {}
+        for row in rows:
+            if row["diff_available"]:
+                diffs[row["path"]] = self.review_diff(value, row["id"])
+        (root / "diffs.json").write_text(encode(self.redact(diffs)) + "\n")
         return root
+
+    def _review(self, value):
+        current = self.get_run(value)
+        row = self.connection.execute("SELECT body FROM run_reviews WHERE run_id=?", (run_id(value),)).fetchone()
+        if row:
+            return json.loads(row[0])
+        return {"version": 1, "state": "pending" if current["status"] not in TERMINAL else "unavailable",
+                "reason": "not_captured", "baseline": None, "end": None,
+                "parent_run_id": current.get("parent_run_id", "")}
+
+    def review_get(self, value):
+        review = self._review(value)
+        result = {k: review.get(k) for k in ("version", "state", "reason", "parent_run_id")}
+        for stage in ("baseline", "end"):
+            snapshot = review.get(stage)
+            result[stage] = None if snapshot is None else {
+                k: snapshot.get(k) for k in ("captured_at", "complete", "notes", "git", "git_status_mode")}
+            if snapshot:
+                result[stage]["file_count"] = len(snapshot["files"])
+                omissions = {}
+                for entry in snapshot["files"].values():
+                    if entry.get("reason"):
+                        omissions[entry["reason"]] = omissions.get(entry["reason"], 0) + 1
+                result[stage]["content_omissions"] = omissions
+        result["change_count"] = len(self.review_changes(value))
+        result["initial_change_count"] = len((review.get("baseline") or {}).get("initial_status", []))
+        return self.redact(result)
+
+    def review_begin(self, value):
+        run = self.get_run(value)
+        if run["status"] not in {"running", "cancelling"} or run.get("parent_run_id"):
+            raise ApplicationError("invalid_request", "Only an executing root run can capture a review")
+        with self.transaction():
+            self.connection.execute("INSERT OR IGNORE INTO run_reviews VALUES (?,?)", (run_id(value), encode({
+                "version": 1, "state": "collecting", "reason": "", "baseline": None, "end": None})))
+
+    def review_blob(self, value, content):
+        from .review import MAX_FILE_BYTES, MAX_RUN_BYTES, MAX_WORKSPACE_BYTES
+
+        if self._review(value)["state"] != "collecting":
+            return None
+        if not isinstance(content, str) or len(content) > (MAX_FILE_BYTES + 2) // 3 * 4:
+            raise ApplicationError("invalid_request", "Review content exceeds size limit")
+        data = base64.b64decode(content, validate=True)
+        if len(data) > MAX_FILE_BYTES:
+            raise ApplicationError("invalid_request", "Review content exceeds size limit")
+        key = hashlib.sha256(data).hexdigest()
+        with self.transaction():
+            if self.connection.execute("SELECT 1 FROM review_blobs WHERE run_id=? AND hash=?", (run_id(value), key)).fetchone():
+                return key
+            run_bytes = self.connection.execute("SELECT COALESCE(SUM(LENGTH(body)),0) FROM review_blobs WHERE run_id=?", (run_id(value),)).fetchone()[0]
+            workspace_bytes = self.connection.execute("SELECT COALESCE(SUM(LENGTH(body)),0) FROM review_blobs").fetchone()[0]
+            if run_bytes + len(data) > MAX_RUN_BYTES or workspace_bytes + len(data) > MAX_WORKSPACE_BYTES:
+                return None
+            self.connection.execute("INSERT INTO review_blobs VALUES (?,?,?)", (run_id(value), key, data))
+        return key
+
+    def review_save(self, value, stage, snapshot):
+        from .review import MAX_FILES, MAX_MANIFEST_BYTES
+
+        if stage not in {"baseline", "end"} or not isinstance(snapshot, dict):
+            raise ApplicationError("invalid_request", "Invalid review snapshot")
+        if len(encode(snapshot).encode()) > MAX_MANIFEST_BYTES * 2 or len(snapshot.get("files", {})) > MAX_FILES:
+            raise ApplicationError("invalid_request", "Review manifest exceeds size limit")
+        review = self._review(value)
+        if review["state"] != "collecting" or review.get(stage) is not None:
+            return self.review_get(value)
+        review[stage] = snapshot
+        if stage == "end":
+            rows = self._review_changes(value, review)
+            complete = (review.get("baseline") or {}).get("complete") and snapshot["complete"]
+            review["state"] = "ready" if complete and all(r["diff_available"] for r in rows) else "partial"
+            if not review.get("baseline"):
+                review["reason"] = "baseline_missing"
+        with self.transaction():
+            self.connection.execute("UPDATE run_reviews SET body=? WHERE run_id=?", (encode(review), run_id(value)))
+            self._event(value, "review_updated", {"state": review["state"], "stage": stage})
+        return {"state": review["state"]}
+
+    def review_unavailable(self, value, reason="execution_interrupted"):
+        review = self._review(value)
+        if review["state"] != "collecting":
+            return
+        review.update(state="partial" if review.get("baseline") else "unavailable", reason=reason)
+        with self.transaction():
+            self.connection.execute("UPDATE run_reviews SET body=? WHERE run_id=?", (encode(review), run_id(value)))
+            self._event(value, "review_updated", {"state": review["state"], "reason": reason})
+
+    def review_changes(self, value, scope="run"):
+        review = self._review(value)
+        if scope == "initial":
+            return self.redact((review.get("baseline") or {}).get("initial_status", []))
+        return self.redact(self._review_changes(value, review))
+
+    def _review_changes(self, value, review):
+        from .review import changes, file_id
+
+        rows = changes(review.get("baseline"), review.get("end"))
+        known = {r["path"] for r in rows}
+        captured = set((review.get("baseline") or {}).get("files", {})) | set((review.get("end") or {}).get("files", {}))
+        # Recorded tool evidence can reveal excluded paths, but cannot reconstruct their old content.
+        for row in self.connection.execute("SELECT result FROM tool_calls WHERE run_id=? AND result IS NOT NULL", (run_id(value),)):
+            result = json.loads(row[0])
+            for path in result.get("metadata", {}).get("affected_paths", []):
+                if path not in known and (path not in captured or review.get("end") is None):
+                    rows.append({"id": file_id(path), "path": path, "kind": "unknown",
+                                 "diff_available": False, "reason": "outside_captured_scope" if review.get("end") else "end_snapshot_missing"})
+                    known.add(path)
+        return sorted(rows, key=lambda r: r["path"])
+
+    def review_diff_input(self, value, entry_id):
+        review = self._review(value)
+        row = next((r for r in self._review_changes(value, review) if r["id"] == entry_id), None)
+        if row is None:
+            raise ApplicationError("not_found", "No captured file entry in this run")
+        if not row["diff_available"]:
+            return {"available": False, "reason": row["reason"] or "incomplete_snapshot", "text": ""}
+        texts = []
+        for stage in ("baseline", "end"):
+            entry = (review.get(stage) or {}).get("files", {}).get(row["path"])
+            if entry is None:
+                texts.append("")
+                continue
+            blob = self.connection.execute("SELECT body FROM review_blobs WHERE run_id=? AND hash=?", (run_id(value), entry["blob"])).fetchone()
+            if blob is None:
+                return {"available": False, "reason": "content_missing", "text": ""}
+            texts.append(bytes(blob[0]).decode("utf-8"))
+        redacted = self.redact(texts)
+        return {"available": True, "path": self.redact(row["path"]), "before": redacted[0],
+                "after": redacted[1], "redacted": redacted != texts}
+
+    def review_diff(self, value, entry_id):
+        from .review import render_diff
+
+        return self.redact(render_diff(self.review_diff_input(value, entry_id)))

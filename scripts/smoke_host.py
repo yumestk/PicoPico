@@ -14,7 +14,7 @@ from pico.application import DEFAULT_OPTIONS, _build_model_client
 from pico.config import load_project_env
 from pico.host_client import HostClient
 from pico.security import redact_artifact
-from pico.state_store import TERMINAL, identity
+from pico.state_store import SCHEMA_VERSION, TERMINAL, identity
 
 
 def run_case(provider, name, model=None):
@@ -167,7 +167,7 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     load_project_env(Path.cwd())
-    report = {"storage_schema": 1, "host_protocol": "pico-host-v1", "providers": []}
+    report = {"storage_schema": SCHEMA_VERSION, "host_protocol": "pico-host-v1", "providers": []}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     for provider in args.provider or ["deepseek", "openai", "anthropic", "ollama"]:
         config = {**DEFAULT_OPTIONS, "provider": provider, "model": args.model}

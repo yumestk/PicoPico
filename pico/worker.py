@@ -105,6 +105,18 @@ class WorkerBridge:
     def events(self, value, after=0, limit=1000):
         return self.call("events", value, after, limit)
 
+    def review_begin(self, value):
+        return self.call("review_begin", value)
+
+    def review_blob(self, value, content):
+        return self.call("review_blob", value, content)
+
+    def review_save(self, value, stage, snapshot):
+        return self.call("review_save", value, stage, snapshot)
+
+    def review_unavailable(self, value, reason):
+        return self.call("review_unavailable", value, reason)
+
     def request_approval(self, value, call_id, name, args, baseline):
         return self.call("request_approval", value, call_id, name, args, baseline)
 

@@ -31,6 +31,8 @@ class AgentLoop:
         try:
             if reason == 'final_answer_returned':
                 agent.promote_durable_memory(request, answer)
+            if agent.review is not None:
+                agent.review.finish(cancelled=agent.cancel_event.is_set())
             message = response.message() if response is not None else {'role':'assistant','content':answer}
             agent.session['history'].append({**message,'created_at':now()})
             agent.create_checkpoint(state, request, trigger=reason, persist=False)
@@ -71,6 +73,11 @@ class AgentLoop:
             agent.memory.set_task_summary(user_message)
             agent.record({'role': 'user', 'content': user_message, 'created_at': now()})
             agent.emit_trace(state, 'run_started', {'parent_run_id': state.parent_run_id, 'user_request': clip(user_message, 300)})
+            agent.review = None
+            if not state.parent_run_id:
+                from .review import RunReview
+                agent.review = RunReview(agent.store, agent.root, state.run_id)
+                agent.review.start(agent.cancel_event)
             while state.attempts < max_attempts:
                 if agent.cancel_event.is_set():
                     raise KeyboardInterrupt

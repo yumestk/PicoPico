@@ -6,8 +6,10 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import textwrap
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -57,9 +59,14 @@ class WorkspaceContext:
 
         def git(args, fallback=""):
             try:
+                if args[0] == "status":
+                    from .review import git_status
+                    output, complete = git_status(cwd, time.monotonic() + 5, nul=False)
+                    return output.decode("utf-8", errors="replace").strip() or fallback if complete else fallback
                 result = subprocess.run(
-                    ["git", *args],
+                    ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", *args],
                     cwd=cwd,
+                    env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
                     capture_output=True,
                     text=True,
                     check=True,

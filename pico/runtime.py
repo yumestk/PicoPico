@@ -79,6 +79,7 @@ class Pico:
         self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self._active_call_id = None
         self._approval_id = None
+        self.review = None
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)

@@ -26,6 +26,10 @@ STORE_OPERATIONS = frozenset(
         "get_approval",
         "resolve_approval",
         "permit",
+        "review_begin",
+        "review_blob",
+        "review_save",
+        "review_unavailable",
     }
 )
 
@@ -63,6 +67,7 @@ class RunManager:
         for run in self.store.list_runs(limit=1000000):
             if run["status"] not in TERMINAL:
                 self.store.interrupt(run["run_id"], "host_restarted")
+            self.store.review_unavailable(run["run_id"], "host_restarted")
 
     def pump(self):
         if not self.accepting or self.active is not None:
@@ -88,6 +93,7 @@ class RunManager:
             if self.active_id:
                 try:
                     self.store.interrupt(self.active_id, "supervisor_error")
+                    self.store.review_unavailable(self.active_id, "supervisor_error")
                 except (OSError, ValueError, sqlite3.Error):
                     self.blocked = True
                     self.accepting = False
@@ -114,6 +120,7 @@ class RunManager:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             *(["-I"] if sys.flags.isolated else []),
+            *(["-B"] if sys.dont_write_bytecode else []),
             "-m",
             "pico.worker",
             stdin=asyncio.subprocess.PIPE,
@@ -207,6 +214,7 @@ class RunManager:
         current = self.store.get_run(run["run_id"])
         if current["status"] not in TERMINAL:
             self.store.interrupt(run["run_id"], "worker_exited")
+        self.store.review_unavailable(run["run_id"], "execution_not_confirmed" if self.blocked else "worker_exited")
         for child in self.store.list_runs(limit=1000000):
             if (
                 child.get("parent_run_id") == run["run_id"]

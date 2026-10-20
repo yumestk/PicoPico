@@ -37,7 +37,7 @@ def prepare(root, archive=None):
         raise ValueError("Pinned Python must include its certificate bundle")
     shutil.copy2(certificates, backend / "cacert.pem")
     (backend / "runtime.json").write_text(json.dumps(spec, indent=2) + "\n")
-    subprocess.run([str(python), "-I", "-c", "import pico,sqlite3,ssl; print('Pico runtime ready')"],
+    subprocess.run([str(python), "-I", "-B", "-c", "import pico,sqlite3,ssl; print('Pico runtime ready')"],
                    cwd=backend, check=True)
     return backend
 

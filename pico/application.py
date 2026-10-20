@@ -381,6 +381,9 @@ class ApplicationService:
             "runs.get": ({"run_id": str}, {}),
             "runs.cancel": ({"run_id": str}, {}),
             "runs.export": ({"run_id": str}, {}),
+            "runs.review": ({"run_id": str}, {}),
+            "runs.changes": ({"run_id": str}, {"scope": str, "after_file": int, "limit": int}),
+            "runs.diff": ({"run_id": str, "file_id": str}, {"after_character": int, "max_characters": int}),
             "runs.events": (
                 {"run_id": str},
                 {"after_sequence": int, "limit": int, "wait_ms": int},
@@ -405,6 +408,9 @@ class ApplicationService:
         for name, low, high in [
             ("limit", 0 if method == "sessions.get" else 1, 500),
             ("after_message", 0, 2**63 - 1),
+            ("after_file", 0, 2**63 - 1),
+            ("after_character", 0, 2**63 - 1),
+            ("max_characters", 1, 16384),
             ("after_sequence", 0, 2**63 - 1),
             ("wait_ms", 0, 20000),
         ]:
@@ -450,8 +456,8 @@ class ApplicationService:
             return {
                 "protocol": "pico-host-v1",
                 "backend_version": "0.1.0",
-                "api_version": 1,
-                "capabilities": ["sessions", "runs", "approvals", "events"],
+                "api_version": 2,
+                "capabilities": ["sessions", "runs", "approvals", "events", "run_reviews"],
                 "instance_id": self.manager.instance_id,
                 "workspace": str(self.store.root),
                 "status": "stopping"
@@ -556,6 +562,30 @@ class ApplicationService:
             return self.manager.cancel(params["run_id"])
         if method == "runs.export":
             return {"path": str(self.store.export_run(params["run_id"]))}
+        if method == "runs.review":
+            return self.store.review_get(params["run_id"])
+        if method == "runs.changes":
+            scope = params.get("scope", "run")
+            if scope not in {"initial", "run"}:
+                raise ApplicationError("invalid_request", "Invalid change scope")
+            rows = self.store.review_changes(params["run_id"], scope)
+            after = params.get("after_file", 0)
+            page, size = [], 0
+            for row in rows[after : after + min(params.get("limit", 100), 100)]:
+                size += len(json.dumps(row, ensure_ascii=False).encode())
+                if size > 128 * 1024:
+                    break
+                page.append(row)
+            return {"files": page, "next_file": min(after + len(page), len(rows)), "total": len(rows)}
+        if method == "runs.diff":
+            from .review import render_diff
+            data = self.store.review_diff_input(params["run_id"], params["file_id"])
+            diff = self.store.redact(await asyncio.to_thread(render_diff, data))
+            after = params.get("after_character", 0)
+            # A page holds at most 16 Ki characters, including escaped JSON/control characters.
+            end = min(after + params.get("max_characters", 16384), len(diff["text"]))
+            return {**diff, "text": diff["text"][after:end], "next_character": end,
+                    "has_more": end < len(diff["text"])}
         if method == "approvals.list":
             return self.store.list_approvals()
         if method == "approvals.resolve":

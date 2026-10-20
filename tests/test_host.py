@@ -398,6 +398,9 @@ def test_host_sigkill_stops_shell_and_restart_never_replays_it(tmp_path):
             result = terminal(client, run["run_id"])
             assert result["status"] == "interrupted"
             assert result["report"]["unknown_calls"]
+            review = client.call("runs.review", {"run_id": run["run_id"]})
+            assert review["state"] == "partial"
+            assert review["reason"] == "host_restarted" and review["end"] is None
             time.sleep(1.1)
             assert not (tmp_path / "late").exists()
         finally:
