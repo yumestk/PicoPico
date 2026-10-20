@@ -301,12 +301,12 @@ def _run_memory_variant(mode):
             _set_irrelevant_memory(agent)
 
         result = agent.ask("What color is the deploy key?")
-        task_state = agent.current_task_state
+        run_state = agent.current_run_state
         model_client = agent.model_client
         return {
             "correct": result.strip().lower() == "deploy key is red.",
-            "tool_steps": int(task_state.tool_steps),
-            "attempts": int(task_state.attempts),
+            "tool_steps": int(run_state.tool_steps),
+            "attempts": int(run_state.attempts),
             "repeated_reads": int(getattr(model_client, "followup_reads", 0)),
         }
 
@@ -396,11 +396,11 @@ def _run_memory_task_variant(task, variant):
         elif variant == "memory_irrelevant":
             _set_irrelevant_memory_for_task(agent)
         result = agent.ask(_followup_prompt(task))
-        task_state = agent.current_task_state
+        run_state = agent.current_run_state
         return {
             "correct": result.strip().lower() == f"{task['fact']}.",
-            "tool_steps": int(task_state.tool_steps),
-            "attempts": int(task_state.attempts),
+            "tool_steps": int(run_state.tool_steps),
+            "attempts": int(run_state.attempts),
             "repeated_reads": int(getattr(agent.model_client, "followup_reads", 0)),
         }
 
@@ -814,7 +814,7 @@ def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_
 
 
 def _followup_trace_metrics(agent):
-    trace_path = agent.run_store.trace_path(agent.current_task_state)
+    trace_path = agent.run_store.trace_path(agent.current_run_state)
     events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     repeated_reads = sum(1 for event in events if event.get("event") == "tool_executed" and event.get("name") == "read_file")
     return repeated_reads
@@ -899,8 +899,8 @@ def run_real_memory_experiment(provider="gpt", repetitions=1):
                             "task_id": task["id"],
                             "category": task["category"],
                             "correct": _normalize_text(answer) == _normalize_text(task["fact"]),
-                            "tool_steps": int(agent.current_task_state.tool_steps),
-                            "attempts": int(agent.current_task_state.attempts),
+                            "tool_steps": int(agent.current_run_state.tool_steps),
+                            "attempts": int(agent.current_run_state.attempts),
                             "repeated_reads": _followup_trace_metrics(agent),
                         }
                     )
@@ -1026,7 +1026,7 @@ def _setup_real_security_workspace(workspace_root, scenario_id):
 
 
 def _last_tool_metadata(agent):
-    events = [json.loads(line) for line in agent.run_store.trace_path(agent.current_task_state).read_text().splitlines()]
+    events = [json.loads(line) for line in agent.run_store.trace_path(agent.current_run_state).read_text().splitlines()]
     return next((event for event in reversed(events) if event["event"] == "tool_executed"), {})
 
 
@@ -1537,10 +1537,10 @@ def _run_recovery_task_variant(task, variant):
             agent.session.pop("checkpoints", None)
             agent.session_store.save(agent.session)
         final_answer = agent.ask("Continue the recovery task.")
-        report = agent.run_store.load_report(agent.current_task_state.run_id)
+        report = agent.run_store.load_report(agent.current_run_state.run_id)
         trace = [
             json.loads(line)
-            for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+            for line in agent.run_store.trace_path(agent.current_run_state).read_text(encoding="utf-8").splitlines()
         ]
         resume_status = str(report.get("prompt_metadata", {}).get("resume_status", ""))
         stale_reanchored = any(

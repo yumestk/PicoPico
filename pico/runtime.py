@@ -124,7 +124,7 @@ class Pico:
         self.context_manager = ContextManager(self)
         self.resume_state = self.evaluate_resume_state()
         self.session_path = self.session_store.save(self.session)
-        self.current_task_state = None
+        self.current_run_state = None
         self.current_run_dir = None
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
@@ -354,8 +354,8 @@ class Pico:
         metadata.update(self.detected_secret_env_summary())
         return prompt, metadata
 
-    def emit_trace(self, task_state, event, payload=None):
-        return events.emit(self, task_state, event, payload)
+    def emit_trace(self, run_state, event, payload=None):
+        return events.emit(self, run_state, event, payload)
 
     def capture_workspace_snapshot(self):
         snapshot = {}
@@ -391,11 +391,11 @@ class Pico:
                 summaries.append(f"modified:{path}")
         return changed_paths, summaries
 
-    def create_checkpoint(self, task_state, user_message, trigger):
-        return checkpointlib.create_checkpoint(self, task_state, user_message, trigger)
+    def create_checkpoint(self, run_state, user_message, trigger):
+        return checkpointlib.create_checkpoint(self, run_state, user_message, trigger)
 
-    def infer_next_step(self, task_state):
-        return checkpointlib.infer_next_step(task_state)
+    def infer_next_step(self, run_state):
+        return checkpointlib.infer_next_step(run_state)
 
     def update_memory_after_tool(self, name, args, result):
         """把少量高价值工具结果沉淀到 working memory。
@@ -511,12 +511,13 @@ class Pico:
         self.last_durable_superseded = superseded
         return promoted, rejections, superseded
 
-    def ask(self, user_message):
+    def ask(self, user_message, run_id="", parent_run_id=""):
         from .agent_loop import AgentLoop
+        from .run_state import RunState
 
-        if self.depth == 0 and self.current_task_state is not None:
+        if self.depth == 0 and self.current_run_state is not None:
             self.cancel_event.clear()
-        return AgentLoop(self).run(user_message)
+        return AgentLoop(self).run(user_message, RunState.create(user_request=user_message, run_id=run_id, parent_run_id=parent_run_id))
 
     def execute_tool(self, name, args):
         return self.tool_executor.execute(name, args)
@@ -530,28 +531,20 @@ class Pico:
         recent = tool_events[-2:]
         return all(item["name"] == name and item["args"] == args for item in recent)
 
-    @staticmethod
-    def new_task_id():
-        return "task_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-
-    @staticmethod
-    def new_run_id():
-        return "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-
-    def build_report(self, task_state):
+    def build_report(self, run_state):
         # report 是一次运行的最终摘要；
         # 和 trace 的区别在于，trace 关注过程，report 关注结果与关键指标。
         return {
-            "run_id": task_state.run_id,
-            "task_id": task_state.task_id,
-            "status": task_state.status,
-            "stop_reason": task_state.stop_reason,
-            "final_answer": task_state.final_answer,
-            "tool_steps": task_state.tool_steps,
-            "attempts": task_state.attempts,
-            "checkpoint_id": task_state.checkpoint_id,
-            "resume_status": task_state.resume_status,
-            "task_state": task_state.to_dict(),
+            "run_id": run_state.run_id,
+            "parent_run_id": run_state.parent_run_id,
+            "status": run_state.status,
+            "stop_reason": run_state.stop_reason,
+            "final_answer": run_state.final_answer,
+            "tool_steps": run_state.tool_steps,
+            "attempts": run_state.attempts,
+            "checkpoint_id": run_state.checkpoint_id,
+            "resume_status": run_state.resume_status,
+            "run_state": run_state.to_dict(),
             "prompt_metadata": self.last_prompt_metadata,
             "durable_promotions": list(self.last_durable_promotions),
             "durable_rejections": list(self.last_durable_rejections),
@@ -596,10 +589,10 @@ class Pico:
         # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。
         child.session["memory"]["task"] = task
         child.session["memory"]["notes"] = [clip(self.history_text(), 300)]
-        return "delegate_result:\n" + child.ask(task)
+        return "delegate_result:\n" + child.ask(task, parent_run_id=self.current_run_state.run_id if self.current_run_state else "")
 
     def approve(self, name, args):
-        state = self.current_task_state
+        state = self.current_run_state
         payload = {"call_id": self._active_call_id, "name": name, "args": args}
         if self.cancel_event.is_set():
             raise KeyboardInterrupt

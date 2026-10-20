@@ -12,7 +12,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from pico import Pico, SessionStore, WorkspaceContext
-from pico.cli import _build_model_client, build_arg_parser
+from pico.application import _build_model_client
+from pico.cli import build_arg_parser
 from pico.config import load_project_env
 from pico.security import redact_artifact
 
@@ -42,7 +43,7 @@ def run_case(client, parent, name):
     try:
         answer = agent.ask(prompt)
         results = [m for m in agent.session['history'] if m['role'] == 'tool']
-        row.update(run_status=agent.current_task_state.status, tool_steps=agent.current_task_state.tool_steps,
+        row.update(run_status=agent.current_run_state.status, tool_steps=agent.current_run_state.tool_steps,
                    final_answer=answer, run_dir=str(agent.current_run_dir))
         if name == 'workflow':
             reads = [m for m in results if m['name'] == 'read_file' and m['result']['status'] == 'ok']
@@ -51,14 +52,14 @@ def run_case(client, parent, name):
             row['checks'] = {'exact_file': (root / 'sample.txt').read_text() == original.replace('"beta"', '"beta-native"'),
                              'read_before_and_after_patch': bool(patches) and len(reads) >= 2 and results.index(reads[0]) < results.index(patches[0]) < results.index(reads[-1]),
                              'reported_command_failure': any(m['result']['data'].get('exit_code') == 3 and m['result']['status'] == 'error' for m in commands),
-                             'normal_completion': agent.current_task_state.status == 'completed'}
+                             'normal_completion': agent.current_run_state.status == 'completed'}
         elif name == 'denial':
             row['checks'] = {'no_write': not (root / 'forbidden.txt').exists(),
                              'approval_denied': any(m['result']['error_code'] == 'approval_denied' for m in results),
-                             'normal_completion': agent.current_task_state.status == 'completed'}
+                             'normal_completion': agent.current_run_state.status == 'completed'}
         else:
             row['checks'] = {'no_write': not (root / 'forbidden.txt').exists(),
-                             'cancelled': agent.current_task_state.status == 'cancelled'}
+                             'cancelled': agent.current_run_state.status == 'cancelled'}
         row['status'] = 'passed' if all(row['checks'].values()) else 'failed'
     except (RuntimeError, ValueError, OSError) as exc:
         row['error'] = str(exc)

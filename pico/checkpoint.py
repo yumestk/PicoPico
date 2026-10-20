@@ -132,17 +132,17 @@ def render_checkpoint_text(agent):
     return "\n".join(lines)
 
 
-def infer_next_step(task_state):
-    if task_state.status == "completed":
+def infer_next_step(run_state):
+    if run_state.status == "completed":
         return "No next step recorded."
-    if task_state.stop_reason == "step_limit_reached":
+    if run_state.stop_reason == "step_limit_reached":
         return "Resume from the latest checkpoint and continue the task."
-    if task_state.last_tool:
-        return f"Decide the next action after {task_state.last_tool}."
+    if run_state.last_tool:
+        return f"Decide the next action after {run_state.last_tool}."
     return "Continue the task from the latest checkpoint."
 
 
-def create_checkpoint(agent, task_state, user_message, trigger):
+def create_checkpoint(agent, run_state, user_message, trigger):
     state = checkpoint_state(agent)
     current = current_checkpoint(agent)
     checkpoint_id = "ckpt_" + uuid.uuid4().hex[:8]
@@ -158,10 +158,10 @@ def create_checkpoint(agent, task_state, user_message, trigger):
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "created_at": now(),
         "current_goal": str(user_message),
-        "completed": [task_state.final_answer] if task_state.final_answer else [],
+        "completed": [run_state.final_answer] if run_state.final_answer else [],
         "excluded": [],
-        "current_blocker": "" if str(task_state.stop_reason or "") in ("", "final_answer_returned") else str(task_state.stop_reason),
-        "next_step": infer_next_step(task_state),
+        "current_blocker": "" if str(run_state.stop_reason or "") in ("", "final_answer_returned") else str(run_state.stop_reason),
+        "next_step": infer_next_step(run_state),
         "key_files": key_files,
         "freshness": freshness,
         "summary": f"{trigger}: {clip(str(user_message), 120)}",
@@ -169,7 +169,7 @@ def create_checkpoint(agent, task_state, user_message, trigger):
     }
     state["items"][checkpoint_id] = checkpoint
     state["current_id"] = checkpoint_id
-    task_state.checkpoint_id = checkpoint_id
+    run_state.checkpoint_id = checkpoint_id
     agent.session["runtime_identity"] = checkpoint["runtime_identity"]
     agent.session_path = agent.session_store.save(agent.session)
     return checkpoint

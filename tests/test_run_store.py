@@ -1,26 +1,25 @@
 import json
 
+from pico.run_state import STOP_REASON_FINAL_ANSWER_RETURNED, RunState
 from pico.run_store import RunStore
-from pico.task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskState
 
 
 def test_run_store_creates_run_directory_and_state_file(tmp_path):
     store = RunStore(tmp_path / ".pico" / "runs")
-    state = TaskState.create(run_id="run_001", task_id="task_001", user_request="Inspect the repo.")
+    state = RunState.create(run_id="run_001", user_request="Inspect the repo.")
 
     run_dir = store.start_run(state)
 
     assert run_dir == store.run_dir(state.run_id)
     assert run_dir.exists()
-    persisted = json.loads((run_dir / "task_state.json").read_text(encoding="utf-8"))
-    assert persisted["task_id"] == "task_001"
+    persisted = json.loads((run_dir / "run_state.json").read_text(encoding="utf-8"))
     assert persisted["run_id"] == "run_001"
     assert persisted["user_request"] == "Inspect the repo."
 
 
 def test_run_store_appends_trace_jsonl(tmp_path):
     store = RunStore(tmp_path / ".pico" / "runs")
-    state = TaskState.create(run_id="run_002", task_id="task_002", user_request="Trace the run.")
+    state = RunState.create(run_id="run_002", user_request="Trace the run.")
     store.start_run(state)
 
     store.append_trace(state, {"event": "run_started", "created_at": "2026-04-07T00:00:00+00:00"})
@@ -43,21 +42,21 @@ def test_run_store_appends_trace_jsonl(tmp_path):
 
 def test_run_store_writes_report_json(tmp_path):
     store = RunStore(tmp_path / ".pico" / "runs")
-    state = TaskState.create(run_id="run_003", task_id="task_003", user_request="Report the run.")
+    state = RunState.create(run_id="run_003", user_request="Report the run.")
     store.start_run(state)
     state.finish_success("Done.")
 
-    store.write_task_state(state)
-    store.write_report(state, {"task_state": state.to_dict(), "stop_reason": state.stop_reason})
+    store.write_run_state(state)
+    store.write_report(state, {"run_state": state.to_dict(), "stop_reason": state.stop_reason})
 
     report = json.loads(store.report_path(state.run_id).read_text(encoding="utf-8"))
     assert report["stop_reason"] == STOP_REASON_FINAL_ANSWER_RETURNED
-    assert report["task_state"]["final_answer"] == "Done."
+    assert report["run_state"]["final_answer"] == "Done."
 
 
 def test_run_store_tolerates_missing_final_report(tmp_path):
     store = RunStore(tmp_path / ".pico" / "runs")
-    state = TaskState.create(run_id="run_004", task_id="task_004", user_request="Crash before finalize.")
+    state = RunState.create(run_id="run_004", user_request="Crash before finalize.")
 
     store.start_run(state)
     store.append_trace(state, {"event": "run_started"})

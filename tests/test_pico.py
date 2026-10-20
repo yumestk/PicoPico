@@ -346,9 +346,9 @@ def test_build_agent_uses_openai_provider_and_model_override(tmp_path):
         },
         clear=False,
     ), patch(
-        "pico.cli.OllamaModelClient",
+        "pico.application.OllamaModelClient",
         side_effect=AssertionError("ollama client should not be used"),
-    ), patch("pico.cli.OpenAICompatibleModelClient") as mock_openai:
+    ), patch("pico.application.OpenAICompatibleModelClient") as mock_openai:
         fake_client = mock_openai.return_value
         fake_client.protocol = "fake"
         agent = pico_pkg.build_agent(args)
@@ -384,9 +384,9 @@ def test_build_agent_uses_right_codes_shared_key_for_openai_provider(tmp_path):
 
     with patch.dict(os.environ, {"PICO_RIGHT_CODES_API_KEY": "sk-right-codes"}, clear=True):
         with patch(
-            "pico.cli.OllamaModelClient",
+            "pico.application.OllamaModelClient",
             side_effect=AssertionError("ollama client should not be used"),
-        ), patch("pico.cli.OpenAICompatibleModelClient") as mock_openai:
+        ), patch("pico.application.OpenAICompatibleModelClient") as mock_openai:
             fake_client = mock_openai.return_value
             fake_client.protocol = "fake"
             agent = pico_pkg.build_agent(args)
@@ -431,12 +431,12 @@ def test_build_agent_uses_project_env_provider_when_cli_omitted(tmp_path):
     args = pico_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
 
     with patch.dict(os.environ, {}, clear=True), patch(
-        "pico.cli.OllamaModelClient",
+        "pico.application.OllamaModelClient",
         side_effect=AssertionError("ollama client should not be used"),
     ), patch(
-        "pico.cli.AnthropicCompatibleModelClient",
+        "pico.application.AnthropicCompatibleModelClient",
         side_effect=AssertionError("deepseek client should not be used"),
-    ), patch("pico.cli.OpenAICompatibleModelClient") as mock_openai:
+    ), patch("pico.application.OpenAICompatibleModelClient") as mock_openai:
         fake_client = mock_openai.return_value
         fake_client.protocol = "fake"
         agent = pico_pkg.build_agent(args)
@@ -467,12 +467,12 @@ def test_build_agent_prefers_cli_provider_over_project_env_provider(tmp_path):
     )
 
     with patch.dict(os.environ, {}, clear=True), patch(
-        "pico.cli.OllamaModelClient",
+        "pico.application.OllamaModelClient",
         side_effect=AssertionError("ollama client should not be used"),
     ), patch(
-        "pico.cli.OpenAICompatibleModelClient",
+        "pico.application.OpenAICompatibleModelClient",
         side_effect=AssertionError("openai client should not be used"),
-    ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+    ), patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
         fake_client = mock_anthropic.return_value
         fake_client.protocol = "fake"
         agent = pico_pkg.build_agent(args)
@@ -513,12 +513,12 @@ def test_build_agent_uses_anthropic_provider_and_openai_key_fallback(tmp_path):
         },
         clear=True,
     ), patch(
-        "pico.cli.OllamaModelClient",
+        "pico.application.OllamaModelClient",
         side_effect=AssertionError("ollama client should not be used"),
     ), patch(
-        "pico.cli.OpenAICompatibleModelClient",
+        "pico.application.OpenAICompatibleModelClient",
         side_effect=AssertionError("openai client should not be used"),
-    ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+    ), patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
         fake_client = mock_anthropic.return_value
         fake_client.protocol = "fake"
         agent = pico_pkg.build_agent(args)
@@ -539,7 +539,7 @@ def test_build_agent_uses_anthropic_default_model_when_env_is_missing(tmp_path):
         clear=False,
     ):
         os.environ.pop("ANTHROPIC_MODEL", None)
-        with patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+        with patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
             mock_anthropic.return_value.protocol = "fake"
             pico_pkg.build_agent(args)
 
@@ -590,12 +590,12 @@ def test_build_agent_uses_deepseek_provider_and_env_configuration(tmp_path):
         },
         clear=True,
     ), patch(
-        "pico.cli.OllamaModelClient",
+        "pico.application.OllamaModelClient",
         side_effect=AssertionError("ollama client should not be used"),
     ), patch(
-        "pico.cli.OpenAICompatibleModelClient",
+        "pico.application.OpenAICompatibleModelClient",
         side_effect=AssertionError("openai client should not be used"),
-    ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+    ), patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
         fake_client = mock_anthropic.return_value
         fake_client.protocol = "fake"
         agent = pico_pkg.build_agent(args)
@@ -612,7 +612,7 @@ def test_build_agent_uses_deepseek_default_model_when_env_is_missing(tmp_path):
     args = pico_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--provider", "deepseek"])
 
     with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-deepseek"}, clear=True):
-        with patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+        with patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
             mock_anthropic.return_value.protocol = "fake"
             pico_pkg.build_agent(args)
 
@@ -631,12 +631,12 @@ def test_build_agent_uses_deepseek_provider_by_default(tmp_path):
         },
         clear=False,
     ), patch(
-        "pico.cli.OllamaModelClient",
+        "pico.application.OllamaModelClient",
         side_effect=AssertionError("ollama client should not be used"),
     ), patch(
-        "pico.cli.OpenAICompatibleModelClient",
+        "pico.application.OpenAICompatibleModelClient",
         side_effect=AssertionError("openai client should not be used"),
-    ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+    ), patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
         fake_client = mock_anthropic.return_value
         fake_client.protocol = "fake"
         agent = pico_pkg.build_agent(args)
@@ -665,20 +665,20 @@ def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
     assert len(run_dirs) == 1
 
     run_dir = run_dirs[0]
-    task_state = json.loads((run_dir / "task_state.json").read_text(encoding="utf-8"))
+    run_state = json.loads((run_dir / "run_state.json").read_text(encoding="utf-8"))
     report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
     trace_lines = (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
 
-    assert task_state["task_id"] != task_state["run_id"]
-    assert run_dir.name == task_state["run_id"]
-    assert (run_dir / "task_state.json").exists()
+    assert "task_id" not in run_state
+    assert run_dir.name == run_state["run_id"]
+    assert (run_dir / "run_state.json").exists()
     assert (run_dir / "trace.jsonl").exists()
     assert (run_dir / "report.json").exists()
-    assert task_state["stop_reason"] == "final_answer_returned"
-    assert task_state["final_answer"] == "Finished."
+    assert run_state["stop_reason"] == "final_answer_returned"
+    assert run_state["final_answer"] == "Finished."
     assert report["stop_reason"] == "final_answer_returned"
-    assert report["task_state"]["stop_reason"] == "final_answer_returned"
-    assert report["run_id"] == task_state["run_id"]
+    assert report["run_state"]["stop_reason"] == "final_answer_returned"
+    assert report["run_id"] == run_state["run_id"]
     trace_events = [json.loads(line)["event"] for line in trace_lines]
     assert trace_events[0] == "run_started"
     assert trace_events[-1] == "run_finished"
@@ -749,7 +749,7 @@ def test_prompt_budget_metadata_records_budget_decisions(tmp_path):
 
     trace_events = [
         json.loads(line)
-        for line in (agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines())
+        for line in (agent.run_store.trace_path(agent.current_run_state).read_text(encoding="utf-8").splitlines())
     ]
     prompt_events = [event for event in trace_events if event["event"] == "prompt_built"]
     assert prompt_events
@@ -816,17 +816,17 @@ def test_agent_creates_checkpoint_when_context_reduction_happens_and_artifacts_o
     assert checkpoint["current_blocker"] == ""
     assert checkpoint["next_step"]
 
-    task_state = json.loads(agent.run_store.task_state_path(agent.current_task_state).read_text(encoding="utf-8"))
-    report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
+    run_state = json.loads(agent.run_store.run_state_path(agent.current_run_state).read_text(encoding="utf-8"))
+    report = json.loads(agent.run_store.report_path(agent.current_run_state).read_text(encoding="utf-8"))
     trace_events = [
         json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+        for line in agent.run_store.trace_path(agent.current_run_state).read_text(encoding="utf-8").splitlines()
     ]
 
-    assert task_state["checkpoint_id"] == checkpoint["checkpoint_id"]
+    assert run_state["checkpoint_id"] == checkpoint["checkpoint_id"]
     assert report["checkpoint_id"] == checkpoint["checkpoint_id"]
-    assert report["task_state"]["checkpoint_id"] == checkpoint["checkpoint_id"]
-    assert "current_goal" not in task_state
+    assert report["run_state"]["checkpoint_id"] == checkpoint["checkpoint_id"]
+    assert "current_goal" not in run_state
     assert "current_goal" not in report
     checkpoint_events = [event for event in trace_events if event["event"] == "checkpoint_created"]
     assert checkpoint_events
@@ -985,7 +985,7 @@ def test_write_file_trace_records_minimum_tool_contract_fields(tmp_path):
 
     trace_events = [
         json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+        for line in agent.run_store.trace_path(agent.current_run_state).read_text(encoding="utf-8").splitlines()
     ]
     tool_event = [event for event in trace_events if event["event"] == "tool_executed"][-1]
 
@@ -1085,7 +1085,7 @@ def test_freshness_mismatch_creates_checkpoint_before_model_completion(tmp_path)
 
     trace_events = [
         json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+        for line in agent.run_store.trace_path(agent.current_run_state).read_text(encoding="utf-8").splitlines()
     ]
     checkpoint_events = [event for event in trace_events if event["event"] == "checkpoint_created"]
 
@@ -1180,7 +1180,7 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
 
     trace_events = [
         json.loads(line)
-        for line in resumed.run_store.trace_path(resumed.current_task_state).read_text(encoding="utf-8").splitlines()
+        for line in resumed.run_store.trace_path(resumed.current_run_state).read_text(encoding="utf-8").splitlines()
     ]
     mismatch_events = [event for event in trace_events if event["event"] == "runtime_identity_mismatch"]
     assert mismatch_events
@@ -1235,7 +1235,7 @@ def test_explicit_memory_promotion_persists_durable_memory_topics(tmp_path):
     index_path = tmp_path / ".pico" / "memory" / "MEMORY.md"
     conventions_path = tmp_path / ".pico" / "memory" / "topics" / "project-conventions.md"
     decisions_path = tmp_path / ".pico" / "memory" / "topics" / "key-decisions.md"
-    report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
+    report = json.loads(agent.run_store.report_path(agent.current_run_state).read_text(encoding="utf-8"))
 
     assert index_path.exists()
     assert conventions_path.exists()
@@ -1279,7 +1279,7 @@ def test_explicit_memory_promotion_rejects_secret_shaped_and_transient_lines(tmp
 
     agent.ask("Capture these stable facts into durable memory.")
 
-    report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
+    report = json.loads(agent.run_store.report_path(agent.current_run_state).read_text(encoding="utf-8"))
     conventions_path = tmp_path / ".pico" / "memory" / "topics" / "project-conventions.md"
     dependency_path = tmp_path / ".pico" / "memory" / "topics" / "dependency-facts.md"
 
@@ -1308,7 +1308,7 @@ def test_explicit_memory_promotion_supersedes_matching_durable_fact(tmp_path):
     assert agent.ask("Save the updated dependency fact into durable memory.") == "Dependency: Python runtime is 3.12."
 
     dependency_path = tmp_path / ".pico" / "memory" / "topics" / "dependency-facts.md"
-    report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
+    report = json.loads(agent.run_store.report_path(agent.current_run_state).read_text(encoding="utf-8"))
     text = dependency_path.read_text(encoding="utf-8")
 
     assert "Python runtime is 3.12." in text

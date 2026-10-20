@@ -6,7 +6,6 @@ import time
 from .checkpoint import CHECKPOINT_NONE_STATUS
 from .events import PersistenceError
 from .providers.types import ModelProtocolError
-from .task_state import TaskState
 from .tool_result import ToolExecutionResult
 from .workspace import clip, now
 
@@ -33,7 +32,7 @@ class AgentLoop:
             message = response.message() if response is not None else {'role': 'assistant', 'content': answer}
             agent.record({**message, 'created_at': now()})
             checkpoint = agent.create_checkpoint(state, request, trigger=reason)
-            agent.run_store.write_task_state(state)
+            agent.run_store.write_run_state(state)
             agent.run_store.write_report(state, agent.redact_artifact(agent.build_report(state)))
             agent.emit_trace(state, 'checkpoint_created', {'checkpoint_id': checkpoint['checkpoint_id'], 'trigger': reason})
             agent.emit_trace(state, 'run_finished', {'status': state.status, 'stop_reason': reason, 'final_answer': answer,
@@ -41,7 +40,7 @@ class AgentLoop:
         except (OSError, ValueError, TypeError) as exc:
             state.stop('persistence_error', status='failed', final_answer='Could not persist run completion; inspect the workspace before retrying.')
             for save in (lambda: agent.session_store.save(agent.session),
-                         lambda: agent.run_store.write_task_state(state),
+                         lambda: agent.run_store.write_run_state(state),
                          lambda: agent.run_store.write_report(state, agent.redact_artifact(agent.build_report(state)))):
                 try:
                     save()
@@ -75,25 +74,24 @@ class AgentLoop:
                                                 'result': clip(result.content, 500), **result.metadata,
                                                 'tool_status': result.status, 'tool_error_code': result.error_code})
 
-    def run(self, user_message):
+    def run(self, user_message, state):
         agent = self.agent
         started = time.monotonic()
-        state = TaskState.create(run_id=agent.new_run_id(), task_id=agent.new_task_id(), user_request=user_message)
         state.resume_status = agent.resume_state.get('status', CHECKPOINT_NONE_STATUS)
-        agent.current_task_state = state
+        agent.current_run_state = state
         max_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
         try:
             agent.current_run_dir = agent.run_store.start_run(state)
             agent.last_completion_metadata = {}
             agent.memory.set_task_summary(user_message)
             agent.record({'role': 'user', 'content': user_message, 'created_at': now()})
-            agent.emit_trace(state, 'run_started', {'task_id': state.task_id, 'user_request': clip(user_message, 300)})
+            agent.emit_trace(state, 'run_started', {'parent_run_id': state.parent_run_id, 'user_request': clip(user_message, 300)})
             while state.attempts < max_attempts:
                 if agent.cancel_event.is_set():
                     raise KeyboardInterrupt
                 finalization = state.tool_steps >= agent.max_steps
                 state.record_attempt()
-                agent.run_store.write_task_state(state)
+                agent.run_store.write_run_state(state)
                 request, metadata = agent._build_prompt_and_metadata(user_message, allow_tools=not finalization)
                 if finalization:
                     metadata['finalization'] = True
@@ -137,7 +135,7 @@ class AgentLoop:
                             state.record_tool(call.name)
                             result = agent.execute_tool(call.name, call.arguments)
                         self._record_result(state, call, result)
-                        agent.run_store.write_task_state(state)
+                        agent.run_store.write_run_state(state)
                     if agent.cancel_event.is_set():
                         raise KeyboardInterrupt
                     checkpoint = agent.create_checkpoint(state, user_message, trigger='tool_executed')

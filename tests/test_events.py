@@ -22,13 +22,13 @@ def agent_at(path, outputs, **kwargs):
 
 
 def events(agent):
-    return [json.loads(line) for line in agent.run_store.trace_path(agent.current_task_state).read_text().splitlines()]
+    return [json.loads(line) for line in agent.run_store.trace_path(agent.current_run_state).read_text().splitlines()]
 
 
 def assert_terminal(agent, status):
-    state = agent.current_task_state
+    state = agent.current_run_state
     assert state.status == status
-    assert agent.run_store.load_task_state(state.run_id)['status'] == status
+    assert agent.run_store.load_run_state(state.run_id)['status'] == status
     assert agent.run_store.load_report(state.run_id)['status'] == status
     assert agent.session_store.load(agent.session['id'])['history'] == agent.session['history']
     terminal = [e for e in events(agent) if e['event'] == 'run_finished']
@@ -125,7 +125,7 @@ def test_trace_failure_prevents_tool_effects(tmp_path, monkeypatch):
         agent.ask('write')
     assert not (tmp_path / 'no').exists()
     assert_terminal(agent, 'failed')
-    assert agent.current_task_state.stop_reason == 'persistence_error'
+    assert agent.current_run_state.stop_reason == 'persistence_error'
 
 
 @pytest.mark.parametrize('point', ['report', 'memory'])
@@ -147,7 +147,7 @@ def test_completion_persistence_failure_cannot_leave_a_completed_terminal_event(
         monkeypatch.setattr(agent, 'promote_durable_memory', fail_memory)
     with pytest.raises(PersistenceError):
         agent.ask('answer')
-    state = agent.current_task_state
+    state = agent.current_run_state
     assert state.status == 'failed'
     assert agent.run_store.load_report(state.run_id)['status'] == 'failed'
     assert not any(e['event'] == 'run_finished' for e in events(agent))
@@ -183,7 +183,7 @@ from pico.providers.types import ModelResponse, ToolCall
 root=Path({str(tmp_path)!r})
 agent=Pico(FakeModelClient([ModelResponse(tool_calls=[ToolCall('run_shell', {{'command': {command!r}}})])]), WorkspaceContext.build(root), SessionStore(root/'.pico/sessions'), approval_policy='auto')
 agent.ask('run')
-assert agent.current_task_state.status == 'cancelled'
+assert agent.current_run_state.status == 'cancelled'
 """
     process = subprocess.Popen([sys.executable, '-c', script], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:

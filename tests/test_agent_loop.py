@@ -5,6 +5,7 @@ import pytest
 from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
 from pico.agent_loop import AgentLoop
 from pico.providers.types import ModelResponse, ToolCall
+from pico.run_state import RunState
 
 
 def build_agent(tmp_path, outputs, **kwargs):
@@ -30,11 +31,11 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
         ],
     )
 
-    answer = AgentLoop(agent).run("Inspect hello.txt")
+    answer = AgentLoop(agent).run("Inspect hello.txt", RunState.create(user_request="Inspect hello.txt"))
 
     assert answer == "Done."
-    assert agent.current_task_state.status == "completed"
-    assert agent.run_store.report_path(agent.current_task_state.run_id).exists()
+    assert agent.current_run_state.status == "completed"
+    assert agent.run_store.report_path(agent.current_run_state.run_id).exists()
 
 
 def test_pico_ask_delegates_to_agent_loop(tmp_path):
@@ -58,10 +59,10 @@ def test_agent_loop_reserves_a_final_answer_after_tool_budget_is_exhausted(tmp_p
     answer = agent.ask("Inspect all facts and summarize them")
 
     assert answer == "All six facts were inspected."
-    assert agent.current_task_state.status == "completed"
-    assert agent.current_task_state.tool_steps == 6
-    assert agent.current_task_state.attempts == 7
-    trace_path = agent.run_store.trace_path(agent.current_task_state)
+    assert agent.current_run_state.status == "completed"
+    assert agent.current_run_state.tool_steps == 6
+    assert agent.current_run_state.attempts == 7
+    trace_path = agent.run_store.trace_path(agent.current_run_state)
     trace_events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
     assert any(
         event["event"] == "model_requested" and event.get("purpose") == "finalization"
@@ -86,11 +87,11 @@ def test_agent_loop_persists_model_failure_before_reraising(tmp_path):
     with pytest.raises(RuntimeError, match="ended before a text block"):
         agent.ask("Inspect the tests")
 
-    state = agent.current_task_state
+    state = agent.current_run_state
     assert state.status == "failed"
     assert state.stop_reason == "model_error"
     assert state.attempts == 1
-    assert agent.run_store.task_state_path(state).exists()
+    assert agent.run_store.run_state_path(state).exists()
     assert agent.run_store.report_path(state).exists()
     report = agent.run_store.load_report(state.run_id)
     assert report["stop_reason"] == "model_error"
@@ -106,7 +107,7 @@ def test_multiple_calls_are_sequential_and_text_does_not_finish(tmp_path):
     assert agent.ask('read') == 'Both done'
     results = [m for m in agent.session['history'] if m['role'] == 'tool']
     assert [m['call_id'] for m in results] == ['first', 'second']
-    assert agent.current_task_state.tool_steps == 2
+    assert agent.current_run_state.tool_steps == 2
     assert agent.model_client.requests[1].messages[-3]['tool_calls'][0]['id'] == 'first'
 
 
@@ -117,7 +118,7 @@ def test_batch_budget_rejects_remaining_calls_and_disables_tools(tmp_path):
     assert agent.ask('write files') == 'Only one written'
     assert (tmp_path / 'one.txt').exists()
     assert not (tmp_path / 'two.txt').exists()
-    assert agent.current_task_state.tool_steps == 1
+    assert agent.current_run_state.tool_steps == 1
     assert agent.model_client.requests[-1].tools == []
     results = [m for m in agent.session['history'] if m['role'] == 'tool']
     assert results[-1]['result']['error_code'] == 'budget_exceeded'
@@ -127,7 +128,7 @@ def test_truncated_response_never_executes_its_calls(tmp_path):
     agent = build_agent(tmp_path, [ModelResponse(text='partial', finish_reason='length', tool_calls=[
         ToolCall('write_file', {'path': 'bad.txt', 'content': 'bad'})])])
     assert agent.ask('write') == 'partial'
-    assert agent.current_task_state.status == 'failed'
+    assert agent.current_run_state.status == 'failed'
     assert not (tmp_path / 'bad.txt').exists()
     assert agent.last_completion_metadata['finish_reason'] == 'length'
 

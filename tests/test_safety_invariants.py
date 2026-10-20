@@ -7,7 +7,7 @@ from unittest.mock import patch
 from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
 from pico import cli as pico_cli
 from pico.providers.types import ModelResponse, ToolCall
-from pico.task_state import TaskState
+from pico.run_state import RunState
 
 
 def build_workspace(tmp_path):
@@ -80,7 +80,7 @@ def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     with patch.dict(os.environ, {"GITHUB_PAT": "ghp-1", "GH_PAT": "ghp-2"}, clear=True), patch(
-        "pico.cli.OllamaModelClient",
+        "pico.application.OllamaModelClient",
         DummyModelClient,
     ):
         args = pico_cli.build_arg_parser().parse_args(
@@ -111,7 +111,7 @@ def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     with patch.dict(os.environ, {"GH_PAT": "ghp-default-1"}, clear=True), patch(
-        "pico.cli.OllamaModelClient",
+        "pico.application.OllamaModelClient",
         DummyModelClient,
     ):
         args = pico_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
@@ -131,7 +131,7 @@ def test_cli_build_agent_loads_project_env_secrets_before_redaction_setup(tmp_pa
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     (tmp_path / ".env").write_text("PICO_DEEPSEEK_API_KEY=sk-project-secret\n", encoding="utf-8")
-    with patch.dict(os.environ, {}, clear=True), patch("pico.cli.AnthropicCompatibleModelClient", DummyModelClient):
+    with patch.dict(os.environ, {}, clear=True), patch("pico.application.AnthropicCompatibleModelClient", DummyModelClient):
         args = pico_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--provider", "deepseek"])
         agent = pico_cli.build_agent(args)
         assert agent.secret_env_summary()["secret_env_names"] == ["PICO_DEEPSEEK_API_KEY"]
@@ -155,7 +155,7 @@ def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
             "PICO_SECRET_ENV_NAMES": "PICO_CUSTOM_SECRET",
         },
         clear=True,
-    ), patch("pico.cli.OllamaModelClient", DummyModelClient):
+    ), patch("pico.application.OllamaModelClient", DummyModelClient):
         args = pico_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
         agent = pico_cli.build_agent(args)
         assert agent.secret_env_summary()["secret_env_names"] == ["PICO_CUSTOM_SECRET"]
@@ -217,7 +217,7 @@ def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):
             [],
             secret_env_names=("GITHUB_PAT", "GH_PAT"),
         )
-        state = TaskState.create(run_id="run_001", task_id="task_001", user_request="Mask configured secrets")
+        state = RunState.create(run_id="run_001", user_request="Mask configured secrets")
         agent.run_store.start_run(state)
 
         assert set(agent.secret_env_summary()["secret_env_names"]) == {"GITHUB_PAT", "GH_PAT"}
@@ -231,7 +231,7 @@ def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):
         agent.emit_trace(state, "tool_executed", payload)
         agent.run_store.write_report(
             state,
-            agent.redact_artifact({"task_state": state.to_dict(), "payload": payload}),
+            agent.redact_artifact({"run_state": state.to_dict(), "payload": payload}),
         )
 
     run_dir = agent.run_store.run_dir(state.run_id)

@@ -1,15 +1,14 @@
-from pico.task_state import (
+from pico.run_state import (
     STOP_REASON_FINAL_ANSWER_RETURNED,
     STOP_REASON_RETRY_LIMIT_REACHED,
     STOP_REASON_STEP_LIMIT_REACHED,
-    TaskState,
+    RunState,
 )
 
 
-def test_task_state_starts_running_with_empty_progress():
-    state = TaskState.create(run_id="run_001", task_id="task_001", user_request="Inspect the repo.")
+def test_run_state_starts_running_with_empty_progress():
+    state = RunState.create(run_id="run_001", user_request="Inspect the repo.")
 
-    assert state.task_id == "task_001"
     assert state.run_id == "run_001"
     assert state.user_request == "Inspect the repo."
     assert state.status == "running"
@@ -20,8 +19,8 @@ def test_task_state_starts_running_with_empty_progress():
     assert state.final_answer == ""
 
 
-def test_task_state_records_success_and_final_answer():
-    state = TaskState.create(run_id="run_002", task_id="task_002", user_request="Fix the bug.")
+def test_run_state_records_success_and_final_answer():
+    state = RunState.create(run_id="run_002", user_request="Fix the bug.")
     state.record_attempt()
     state.record_tool("read_file")
     state.finish_success("Done.")
@@ -34,8 +33,8 @@ def test_task_state_records_success_and_final_answer():
     assert state.final_answer == "Done."
 
 
-def test_task_state_records_step_limit_stop_reason():
-    state = TaskState.create(run_id="run_003", task_id="task_003", user_request="Try again.")
+def test_run_state_records_step_limit_stop_reason():
+    state = RunState.create(run_id="run_003", user_request="Try again.")
 
     state.stop_step_limit()
 
@@ -43,8 +42,8 @@ def test_task_state_records_step_limit_stop_reason():
     assert state.stop_reason == STOP_REASON_STEP_LIMIT_REACHED
 
 
-def test_task_state_records_retry_limit_stop_reason():
-    state = TaskState.create(run_id="run_004", task_id="task_004", user_request="Try again.")
+def test_run_state_records_retry_limit_stop_reason():
+    state = RunState.create(run_id="run_004", user_request="Try again.")
 
     state.stop_retry_limit()
 
@@ -52,8 +51,8 @@ def test_task_state_records_retry_limit_stop_reason():
     assert state.stop_reason == STOP_REASON_RETRY_LIMIT_REACHED
 
 
-def test_task_state_snapshot_keeps_final_answer():
-    state = TaskState.create(run_id="run_005", task_id="task_005", user_request="Return the answer.")
+def test_run_state_snapshot_keeps_final_answer():
+    state = RunState.create(run_id="run_005", user_request="Return the answer.")
     state.finish_success("Final answer.")
 
     snapshot = state.to_dict()
@@ -62,8 +61,8 @@ def test_task_state_snapshot_keeps_final_answer():
     assert snapshot["stop_reason"] == STOP_REASON_FINAL_ANSWER_RETURNED
 
 
-def test_task_state_snapshot_keeps_checkpoint_reference_without_body():
-    state = TaskState.create(run_id="run_006", task_id="task_006", user_request="Resume the task.")
+def test_run_state_snapshot_keeps_checkpoint_reference_without_body():
+    state = RunState.create(run_id="run_006", user_request="Resume the task.")
     state.checkpoint_id = "ckpt_001"
     state.resume_status = "full-valid"
 
