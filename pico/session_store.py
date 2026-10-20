@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+from .run_store import RunStore
+
 
 class SessionStore:
     def __init__(self, root):
@@ -14,7 +16,7 @@ class SessionStore:
 
     def save(self, session):
         path = self.path(session["id"])
-        path.write_text(json.dumps(session, indent=2), encoding="utf-8")
+        RunStore._write_json_atomic(path, session)
         return path
 
     def load(self, session_id):

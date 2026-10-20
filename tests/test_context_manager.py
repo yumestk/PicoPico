@@ -1,208 +1,110 @@
+import copy
+import json
+
+import pytest
+
 from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
-from pico.context_manager import ContextManager
-
-
-def build_workspace(tmp_path):
-    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    return WorkspaceContext.build(tmp_path)
+from pico.context_manager import ContextBudgetError, ContextManager, message_groups
+from pico.providers.types import ModelProtocolError, ModelResponse, ToolCall
 
 
 def build_agent(tmp_path, outputs, **kwargs):
-    workspace = build_workspace(tmp_path)
-    store = SessionStore(tmp_path / ".pico" / "sessions")
-    approval_policy = kwargs.pop("approval_policy", "auto")
-    return Pico(
-        model_client=FakeModelClient(outputs),
-        workspace=workspace,
-        session_store=store,
-        approval_policy=approval_policy,
-        **kwargs,
-    )
+    (tmp_path / "README.md").write_text("demo\n")
+    return Pico(model_client=FakeModelClient(outputs), workspace=WorkspaceContext.build(tmp_path),
+                session_store=SessionStore(tmp_path / ".pico/sessions"), approval_policy="auto", **kwargs)
 
 
-def test_context_manager_assembles_sections_in_expected_order(tmp_path):
+def tool_round(size=100):
+    call = ToolCall("read_file", {"path": "README.md"}, "call_test")
+    return [ModelResponse(tool_calls=[call], provider_blocks=[{"opaque": "SIGNED"}]).message(),
+            {"role": "tool", "call_id": call.id, "name": call.name, "content": "X" * size}]
+
+
+def test_context_builds_native_messages_and_keeps_user_request(tmp_path):
     agent = build_agent(tmp_path, [])
-    agent.memory.append_note("deploy key is red", tags=("deploy",), created_at="2026-04-07T10:00:00+00:00")
-    agent.record({"role": "user", "content": "old request", "created_at": "2026-04-07T09:59:00+00:00"})
-    agent.record({"role": "assistant", "content": "old answer", "created_at": "2026-04-07T10:00:30+00:00"})
-
-    prompt, metadata = ContextManager(agent).build("Where is the deploy key?")
-
-    assert prompt.index("You are pico") < prompt.index("Memory:")
-    assert prompt.index("Memory:") < prompt.index("Relevant memory:")
-    assert prompt.index("Relevant memory:") < prompt.index("Transcript:")
-    assert prompt.index("Transcript:") < prompt.index("Current user request:")
-    assert prompt.rstrip().endswith("Current user request:\nWhere is the deploy key?")
-    assert metadata["section_order"] == ["prefix", "memory", "relevant_memory", "history", "current_request"]
+    agent.record({"role": "user", "content": "old request"})
+    agent.record({"role": "assistant", "content": "old answer"})
+    req, meta = ContextManager(agent).build("current request")
+    assert req.system.index("You are pico") < req.system.index("Memory:") < req.system.index("Relevant memory:")
+    assert req.messages[-1] == {"role": "user", "content": "current request"}
+    assert req.tools[0]["parameters"]["type"] == "object"
+    assert meta["budget_unit"] == "characters"
+    assert meta["tool_schema_chars"] > 0
+    assert not any(m["content"] == "current request" for m in agent.session["history"])
 
 
-def test_context_manager_reduces_relevant_memory_before_history_and_preserves_newer_context(tmp_path):
+def test_context_drops_complete_old_groups_without_modifying_history(tmp_path):
     agent = build_agent(tmp_path, [])
-    agent.prefix = "PREFIX " + ("A" * 600)
-    agent.memory.render_memory_text = lambda: "MEMORY " + ("B" * 600)
-    agent.memory.append_note("keep episodic note one " + ("C" * 220), tags=("keep",), created_at="2026-04-07T10:00:00+00:00")
-    agent.memory.append_note("keep episodic note two " + ("D" * 220), tags=("keep",), created_at="2026-04-07T10:01:00+00:00")
-    agent.memory.append_note("keep episodic note three " + ("E" * 220), tags=("keep",), created_at="2026-04-07T10:02:00+00:00")
-    agent.record({"role": "user", "content": "OLD-CONTEXT " + ("D" * 260), "created_at": "2026-04-07T09:59:00+00:00"})
-    for minute in range(1, 8):
-        role = "assistant" if minute % 2 == 1 else "user"
-        content = "RECENT-CONTEXT " + ("E" * 260) if minute == 7 else f"recent-{minute} " + ("E" * 180)
-        agent.record({"role": role, "content": content, "created_at": f"2026-04-07T10:0{minute}:00+00:00"})
-
-    manager = ContextManager(
-        agent,
-        total_budget=700,
-        section_budgets={
-            "prefix": 120,
-            "memory": 120,
-            "relevant_memory": 120,
-            "history": 400,
-        },
-    )
-
-    prompt, metadata = manager.build("keep this request verbatim")
-
-    for section in ("prefix", "memory", "relevant_memory", "history"):
-        assert metadata["sections"][section]["rendered_chars"] <= metadata["sections"][section]["budget_chars"]
-
-    reduction_sections = [entry["section"] for entry in metadata["budget_reductions"]]
-    assert reduction_sections[0] == "relevant_memory"
-    assert reduction_sections
-    assert "RECENT-CONTEXT" in prompt
-    assert "OLD-CONTEXT" not in prompt
-    assert "keep this request verbatim" in prompt
+    for i in range(5):
+        for message in tool_round(300):
+            message = copy.deepcopy(message)
+            if message.get("tool_calls"):
+                message["tool_calls"][0]["id"] = f"old_{i}"
+            if message["role"] == "tool":
+                message["call_id"] = f"old_{i}"
+            agent.record(message)
+    agent.record({"role": "user", "content": "current"})
+    for message in tool_round(100):
+        agent.record(message)
+    before = copy.deepcopy(agent.session["history"])
+    req, meta = ContextManager(agent, section_budgets={"history": 400}).build("current")
+    assert req.messages[-2:] == tool_round(100)
+    assert not any(m.get("call_id", "").startswith("old_") for m in req.messages)
+    assert meta["history"]["dropped_groups"] > 0
+    assert agent.session["history"] == before
+    assert message_groups(req.messages)
 
 
-def test_context_manager_renders_top_three_episodic_notes_per_note_under_budget(tmp_path):
+def test_required_round_too_large_fails_instead_of_truncating(tmp_path):
     agent = build_agent(tmp_path, [])
-    agent.memory.append_note("alpha episodic note " + ("A" * 120), tags=("recall",), created_at="2026-04-07T10:00:00+00:00")
-    agent.memory.append_note("beta episodic recall note " + ("B" * 120), created_at="2026-04-07T10:01:00+00:00")
-    agent.memory.append_note("gamma episodic note " + ("C" * 120), tags=("recall",), created_at="2026-04-07T10:02:00+00:00")
-    agent.memory.append_note("older unmatched note", created_at="2026-04-07T09:59:00+00:00")
-    agent.memory.append_note("Unrelated note", created_at="2026-04-07T11:00:00+00:00")
-
-    prompt, metadata = ContextManager(
-        agent,
-        total_budget=250,
-        section_budgets={
-            "prefix": 60,
-            "memory": 60,
-            "relevant_memory": 80,
-            "history": 60,
-        },
-    ).build("recall")
-
-    assert metadata["relevant_memory"]["selected_count"] == 3
-    assert metadata["relevant_memory"]["limit"] == 3
-    assert metadata["relevant_memory"]["selected_notes"] == [
-        "gamma episodic note " + ("C" * 120),
-        "alpha episodic note " + ("A" * 120),
-        "beta episodic recall note " + ("B" * 120),
-    ]
-    assert len(metadata["relevant_memory"]["rendered_notes"]) == 3
-    assert metadata["relevant_memory"]["rendered_count"] == 3
-    assert metadata["relevant_memory"]["rendered_notes"][0].startswith("gamma episodi")
-    assert metadata["relevant_memory"]["rendered_notes"][1].startswith("alpha episodi")
-    assert metadata["relevant_memory"]["rendered_notes"][2].startswith("beta episodi")
-    relevant_section = prompt.split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
-    assert len([line for line in relevant_section.splitlines() if line.startswith("- ")]) == 3
-    assert "alpha episodi" in relevant_section
-    assert "beta episodic" in relevant_section
-    assert "gamma episodi" in relevant_section
-    assert "older unmatched note" not in relevant_section
+    agent.record({"role": "user", "content": "current"})
+    for message in tool_round(10000):
+        agent.record(message)
+    before = copy.deepcopy(agent.session["history"])
+    with pytest.raises(ContextBudgetError):
+        ContextManager(agent, total_budget=4000).build("current")
+    assert agent.session["history"] == before
 
 
-def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
+def test_schema_and_current_request_are_in_the_budget(tmp_path):
     agent = build_agent(tmp_path, [])
-    agent.prefix = "PREFIX " + ("A" * 600)
-    agent.memory.render_memory_text = lambda: "MEMORY " + ("B" * 600)
-    agent.memory.retrieval_view = lambda query, limit=3: "Relevant memory:\n" + "\n".join(f"- {i} " + ("C" * 220) for i in range(5))
-    agent.history_text = lambda: "Transcript:\n" + "\n".join(f"[user] {i} " + ("D" * 220) for i in range(5))
-
-    request = "please preserve this request exactly"
-    prompt, metadata = ContextManager(
-        agent,
-        total_budget=250,
-        section_budgets={
-            "prefix": 80,
-            "memory": 80,
-            "relevant_memory": 80,
-            "history": 80,
-        },
-    ).build(request)
-
-    assert prompt.split("Current user request:\n", 1)[1] == request
-    assert metadata["current_request"]["text"] == request
-    assert metadata["current_request"]["rendered_chars"] == len(request)
+    with pytest.raises(ContextBudgetError):
+        ContextManager(agent, total_budget=50).build("keep this exact request")
 
 
-def test_context_manager_collapses_older_duplicate_reads_into_one_summary_line(tmp_path):
-    file_path = tmp_path / "sample.txt"
-    file_path.write_text("alpha\nbeta\n", encoding="utf-8")
+@pytest.mark.parametrize("history", [[tool_round()[1]], [tool_round()[0]],
+                                    [tool_round()[0], {**tool_round()[1], "call_id": "wrong"}]])
+def test_orphan_and_unresolved_calls_rejected(history):
+    with pytest.raises(ModelProtocolError):
+        message_groups(history)
+
+
+def test_relevant_memory_selection_and_bounded_rendering(tmp_path):
     agent = build_agent(tmp_path, [])
-    agent.memory.set_file_summary("sample.txt", "alpha | beta")
-    agent.memory.remember_file("sample.txt")
-
-    for created_at in ("2026-04-07T09:00:00+00:00", "2026-04-07T09:01:00+00:00"):
-        agent.record(
-            {
-                "role": "tool",
-                "name": "read_file",
-                "args": {"path": "sample.txt", "start": 1, "end": 2},
-                "content": "# sample.txt\nalpha\nbeta\n",
-                "created_at": created_at,
-            }
-        )
-
-    for minute in range(2, 8):
-        role = "user" if minute % 2 == 0 else "assistant"
-        agent.record(
-            {
-                "role": role,
-                "content": f"recent-{minute}",
-                "created_at": f"2026-04-07T09:0{minute}:00+00:00",
-            }
-        )
-
-    prompt, metadata = ContextManager(agent).build("check the file")
-    transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
-
-    assert transcript.count("[tool:read_file]") == 0
-    assert "sample.txt -> alpha | beta" in transcript
-    assert metadata["history"]["older_entries_count"] == 1
-    assert metadata["history"]["collapsed_duplicate_reads"] == 1
-    assert metadata["history"]["reused_file_summary_count"] == 1
+    for word in ("alpha", "beta", "gamma", "delta"):
+        agent.memory.append_note(word + " recall " + "N" * 160, tags=("recall",))
+    req, meta = ContextManager(agent, section_budgets={"relevant_memory": 300}).build("recall")
+    relevant = meta["relevant_memory"]
+    assert relevant["selected_count"] == 3
+    assert relevant["rendered_count"] == 3
+    assert relevant["rendered_chars"] <= 300
+    assert all(note in req.system for note in relevant["rendered_notes"])
 
 
-def test_context_manager_summarizes_older_tool_output_into_one_line(tmp_path):
+def test_overflow_reduces_optional_context_before_required_messages(tmp_path):
     agent = build_agent(tmp_path, [])
-    agent.record(
-        {
-            "role": "tool",
-            "name": "run_shell",
-            "args": {"command": "pytest -q"},
-            "content": "FAIL test_one\nFAIL test_two\nFAIL test_three\nFAIL test_four\n",
-            "created_at": "2026-04-07T09:00:00+00:00",
-        }
-    )
+    agent.memory.render_memory_text = lambda: "Memory: " + "M" * 3000
+    agent.record({"role": "user", "content": "old " + "H" * 3000})
+    req, meta = ContextManager(agent, total_budget=4000).build("preserve current")
+    assert req.char_count() <= 4000
+    assert req.messages[-1]["content"] == "preserve current"
+    assert meta["budget_reductions"]
 
-    for minute in range(1, 7):
-        role = "user" if minute % 2 == 1 else "assistant"
-        agent.record(
-            {
-                "role": role,
-                "content": f"recent-{minute}",
-                "created_at": f"2026-04-07T09:0{minute}:00+00:00",
-            }
-        )
 
-    prompt, metadata = ContextManager(agent).build("check failures")
-    transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
-
-    assert 'pytest -q -> FAIL test_one | FAIL test_two | FAIL test_three' in transcript
-    assert "FAIL test_four" not in transcript
-    assert metadata["history"]["summarized_tool_count"] == 1
-    assert metadata["history"]["reused_file_summary_count"] == 0
+def test_finalization_removes_tool_schemas(tmp_path):
+    agent = build_agent(tmp_path, [])
+    req, _ = ContextManager(agent).build("summarize", allow_tools=False)
+    assert req.tools == []
 
 
 def test_context_manager_relevant_memory_can_mix_durable_notes(tmp_path):
@@ -230,7 +132,7 @@ def test_context_manager_relevant_memory_can_mix_durable_notes(tmp_path):
     agent = build_agent(tmp_path, [])
 
     prompt, metadata = ContextManager(agent).build("What conventions should I follow?")
-    relevant_section = prompt.split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
+    relevant_section = prompt.system.split("Relevant memory:\n", 1)[1]
 
     assert "Use constrained tools instead of guessing." in relevant_section
     assert any("Use constrained tools instead of guessing." in item for item in metadata["relevant_memory"]["selected_notes"])

@@ -1,3 +1,4 @@
+from pico.providers.types import ModelResponse, ToolCall
 import json
 
 import pytest
@@ -11,7 +12,7 @@ def build_agent(tmp_path, allowed_tools=None):
     workspace = WorkspaceContext.build(tmp_path)
     store = SessionStore(tmp_path / ".pico" / "sessions")
     return Pico(
-        model_client=FakeModelClient(["<final>Done.</final>"]),
+        model_client=FakeModelClient([ModelResponse(text='Done.')]),
         workspace=workspace,
         session_store=store,
         approval_policy="auto",
@@ -22,10 +23,10 @@ def build_agent(tmp_path, allowed_tools=None):
 def test_allowed_tools_filter_prompt_and_reject_direct_execution(tmp_path):
     agent = build_agent(tmp_path, allowed_tools=["read_file"])
 
-    prompt = agent.prompt("Read the README")
+    prompt = agent.build_request("Read the README").text()
 
-    assert "- read_file(" in prompt
-    assert "- run_shell(" not in prompt
+    assert "- read_file:" in prompt
+    assert "- run_shell:" not in prompt
     assert agent.execute_tool("run_shell", {"command": "echo hi", "timeout": 20}).content == "error: tool 'run_shell' is not allowed in this run"
 
 
@@ -91,7 +92,7 @@ def test_benchmark_evaluator_applies_allowed_tools_to_runtime_prompt(tmp_path):
 
     class CaptureModelClient(FakeModelClient):
         def __init__(self):
-            super().__init__(["<final>Done.</final>"])
+            super().__init__([ModelResponse(text='Done.')])
             captured_clients.append(self)
 
     evaluator = BenchmarkEvaluator(
@@ -104,5 +105,5 @@ def test_benchmark_evaluator_applies_allowed_tools_to_runtime_prompt(tmp_path):
     row = evaluator.run_task(evaluator.load()["tasks"][0])
 
     assert row["status"] == "pass"
-    assert "- read_file(" in captured_clients[0].prompts[0]
-    assert "- run_shell(" not in captured_clients[0].prompts[0]
+    assert "- read_file:" in captured_clients[0].requests[0].text()
+    assert "- run_shell:" not in captured_clients[0].requests[0].text()

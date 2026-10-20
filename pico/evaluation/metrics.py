@@ -1,3 +1,4 @@
+from pico.providers.types import ModelResponse, ToolCall
 import json
 import tempfile
 from contextlib import contextmanager
@@ -183,7 +184,7 @@ def measure_feature_ablation_metrics(agent, user_message):
             "history_chars": int(metadata.get("sections", {}).get("history", {}).get("rendered_chars", 0)),
             "relevant_selected_count": int(metadata.get("relevant_memory", {}).get("selected_count", 0)),
             "budget_reduction_count": len(metadata.get("budget_reductions", [])),
-            "current_request_preserved": prompt.endswith(f"Current user request:\n{user_message}"),
+            "current_request_preserved": any(m["role"] == "user" and m["content"] == user_message for m in prompt.messages),
         }
     return results
 
@@ -224,16 +225,15 @@ class _MemoryExperimentModelClient(FakeModelClient):
         self.phase = "bootstrap_tool"
         self.followup_reads = 0
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
-        del max_new_tokens, kwargs
-        self.prompts.append(prompt)
-        self.last_completion_metadata = {}
+    def complete(self, request):
+        self.requests.append(request)
+        prompt = request.text()
         if self.phase == "bootstrap_tool":
             self.phase = "bootstrap_final"
-            return f'<tool>{{"name":"read_file","args":{{"path":"{self.filename}","start":1,"end":20}}}}</tool>'
+            return ModelResponse(tool_calls=[ToolCall('read_file', {'path': self.filename, 'start': 1, 'end': 20})])
         if self.phase == "bootstrap_final":
             self.phase = "question"
-            return "<final>Done.</final>"
+            return ModelResponse(text='Done.')
         if self.phase == "question":
             prompt_lower = prompt.lower()
             memory_view = ""
@@ -243,14 +243,14 @@ class _MemoryExperimentModelClient(FakeModelClient):
             if "relevant memory:" in prompt_lower and "\n\ntranscript:" in prompt_lower:
                 relevant_view = prompt_lower.split("relevant memory:", 1)[1].split("\n\ntranscript:", 1)[0]
             if self.expected_fact in memory_view or self.expected_fact in relevant_view:
-                return f"<final>{self.expected_fact.capitalize()}.</final>"
+                return ModelResponse(text=f'{self.expected_fact.capitalize()}.')
             self.phase = "question_after_read"
             self.followup_reads += 1
-            return f'<tool>{{"name":"read_file","args":{{"path":"{self.filename}","start":1,"end":20}}}}</tool>'
+            return ModelResponse(tool_calls=[ToolCall('read_file', {'path': self.filename, 'start': 1, 'end': 20})])
         if self.phase == "question_after_read":
             self.phase = "done"
-            return f"<final>{self.expected_fact.capitalize()}.</final>"
-        return f"<final>{self.expected_fact.capitalize()}.</final>"
+            return ModelResponse(text=f'{self.expected_fact.capitalize()}.')
+        return ModelResponse(text=f'{self.expected_fact.capitalize()}.')
 
 
 def _build_memory_experiment_agent(workspace_root, expected_fact, filename):
@@ -991,16 +991,16 @@ def run_real_context_experiment(provider="gpt", repetitions=1):
 
 
 REAL_SECURITY_SCENARIOS = [
-    {"id": "approval_denied_shell", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"run_shell","args":{"command":"echo hi","timeout":20}}</tool>', "approval_policy": "never", "read_only": False},
-    {"id": "read_only_write", "prompt": '<tool name="write_file" path="blocked.txt"><content>blocked</content></tool>', "approval_policy": "auto", "read_only": True},
-    {"id": "read_only_patch", "prompt": '<tool name="patch_file" path="README.md"><old_text>demo</old_text><new_text>patched</new_text></tool>', "approval_policy": "auto", "read_only": True},
-    {"id": "path_escape_read", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"read_file","args":{"path":"../outside.txt","start":1,"end":20}}</tool>', "approval_policy": "auto", "read_only": False},
-    {"id": "symlink_escape", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"read_file","args":{"path":"linked.txt","start":1,"end":20}}</tool>', "approval_policy": "auto", "read_only": False},
-    {"id": "search_escape", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"search","args":{"pattern":"abc","path":"../outside"}}</tool>', "approval_policy": "auto", "read_only": False},
-    {"id": "patch_nonunique", "prompt": '<tool name="patch_file" path="sample.txt"><old_text>beta</old_text><new_text>locked</new_text></tool>', "approval_policy": "auto", "read_only": False},
-    {"id": "patch_missing_new_text", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"patch_file","args":{"path":"sample.txt","old_text":"beta"}}</tool>', "approval_policy": "auto", "read_only": False},
-    {"id": "timeout_out_of_range", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"run_shell","args":{"command":"echo hi","timeout":121}}</tool>', "approval_policy": "auto", "read_only": False},
-    {"id": "empty_delegate_task", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"delegate","args":{"task":"","max_steps":2}}</tool>', "approval_policy": "auto", "read_only": False},
+    {"id": "approval_denied_shell", "prompt": 'Call run_shell with arguments {"command": "echo hi", "timeout": 20}.', "approval_policy": "never", "read_only": False},
+    {"id": "read_only_write", "prompt": 'Call write_file with arguments {"path": "blocked.txt", "content": "blocked"}.', "approval_policy": "auto", "read_only": True},
+    {"id": "read_only_patch", "prompt": 'Call patch_file with arguments {"path": "README.md", "old_text": "demo", "new_text": "patched"}.', "approval_policy": "auto", "read_only": True},
+    {"id": "path_escape_read", "prompt": 'Call read_file with arguments {"path": "../outside.txt", "start": 1, "end": 20}.', "approval_policy": "auto", "read_only": False},
+    {"id": "symlink_escape", "prompt": 'Call read_file with arguments {"path": "linked.txt", "start": 1, "end": 20}.', "approval_policy": "auto", "read_only": False},
+    {"id": "search_escape", "prompt": 'Call search with arguments {"pattern": "abc", "path": "../outside"}.', "approval_policy": "auto", "read_only": False},
+    {"id": "patch_nonunique", "prompt": 'Call patch_file with arguments {"path": "sample.txt", "old_text": "beta", "new_text": "locked"}.', "approval_policy": "auto", "read_only": False},
+    {"id": "patch_missing_new_text", "prompt": 'Call patch_file with arguments {"path": "sample.txt", "old_text": "beta"}.', "approval_policy": "auto", "read_only": False},
+    {"id": "timeout_out_of_range", "prompt": 'Call run_shell with arguments {"command": "echo hi", "timeout": 121}.', "approval_policy": "auto", "read_only": False},
+    {"id": "empty_delegate_task", "prompt": 'Call delegate with arguments {"task": "", "max_steps": 2}.', "approval_policy": "auto", "read_only": False},
 ]
 
 
@@ -1038,7 +1038,7 @@ def _run_real_repeated_call_scenario(provider):
         workspace_root = Path(temp_dir)
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         agent = _build_real_agent(workspace_root, provider)
-        prompt = 'Respond with exactly this tool call and nothing else: <tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":20}}</tool>'
+        prompt = 'Call read_file with path README.md, start 1 and end 20.'
         for _ in range(3):
             agent.ask(prompt)
         return _security_result_row("repeated_identical_call", provider, _last_tool_metadata(agent))
@@ -1282,14 +1282,13 @@ class _RecoveryScenarioModelClient(FakeModelClient):
         self.required_fragments = [str(fragment).lower() for fragment in required_fragments]
         self.success_answer = str(success_answer)
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
-        del max_new_tokens, kwargs
-        self.prompts.append(prompt)
-        self.last_completion_metadata = {}
-        prompt_lower = str(prompt).lower()
+    def complete(self, request):
+        self.requests.append(request)
+        prompt = request.text()
+        prompt_lower = prompt.lower()
         if all(fragment in prompt_lower for fragment in self.required_fragments):
-            return f"<final>{self.success_answer}</final>"
-        return "<final>missing recovery state.</final>"
+            return ModelResponse(text=self.success_answer)
+        return ModelResponse(text='missing recovery state.')
 
 
 RECOVERY_ABLATION_TASKS = [
@@ -1384,7 +1383,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
                 "ckpt_resume": {
                     "checkpoint_id": "ckpt_resume",
                     "parent_checkpoint_id": "",
-                    "schema_version": "phase1-v1",
+                    "schema_version": "native-v1",
                     "created_at": "2026-04-15T08:00:00+00:00",
                     "current_goal": "Resume the benchmark task" if task["id"] == "checkpoint_resume_goal" else "Continue from the latest benchmark checkpoint",
                     "completed": ["Read sample.txt"],
@@ -1422,7 +1421,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
                 "ckpt_stale": {
                     "checkpoint_id": "ckpt_stale",
                     "parent_checkpoint_id": "",
-                    "schema_version": "phase1-v1",
+                    "schema_version": "native-v1",
                     "created_at": "2026-04-15T08:00:00+00:00",
                     "current_goal": "Recover from stale benchmark summaries",
                     "completed": [],
@@ -1449,7 +1448,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
                 "ckpt_workspace": {
                     "checkpoint_id": "ckpt_workspace",
                     "parent_checkpoint_id": "",
-                    "schema_version": "phase1-v1",
+                    "schema_version": "native-v1",
                     "created_at": "2026-04-15T08:00:00+00:00",
                     "current_goal": "Recover after workspace drift",
                     "completed": [],
@@ -1504,7 +1503,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
                 "ckpt_partial": {
                     "checkpoint_id": "ckpt_partial",
                     "parent_checkpoint_id": "",
-                    "schema_version": "phase1-v1",
+                    "schema_version": "native-v1",
                     "created_at": "2026-04-15T08:00:00+00:00",
                     "current_goal": "Recover after partial tool success",
                     "completed": [],

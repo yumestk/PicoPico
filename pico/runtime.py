@@ -90,9 +90,15 @@ class Pico:
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
             "created_at": now(),
             "workspace_root": workspace.repo_root,
+            "format": "native-v1",
+            "provider_protocol": model_client.protocol,
             "history": [],
             "memory": memorylib.default_memory_state(),
         }
+        if self.session.get("format") != "native-v1":
+            raise ValueError("Unsupported session format; start a new session. Original data was not changed.")
+        if self.session.get("provider_protocol") != model_client.protocol:
+            raise ValueError("Session provider protocol changed; start a new session.")
         self._ensure_session_shape()
         self.memory = memorylib.LayeredMemory(
             self.session.setdefault("memory", memorylib.default_memory_state()),
@@ -264,7 +270,7 @@ class Pico:
     def feature_enabled(self, name):
         return bool(self.feature_flags.get(str(name), False))
 
-    def prompt(self, user_message):
+    def build_request(self, user_message):
         prompt, _ = self._build_prompt_and_metadata(user_message)
         return prompt
 
@@ -304,10 +310,10 @@ class Pico:
         _, metadata = self._build_prompt_and_metadata(user_message)
         return metadata
 
-    def _build_prompt_and_metadata(self, user_message):
+    def _build_prompt_and_metadata(self, user_message, allow_tools=True):
         refresh = self.refresh_prefix()
         self.resume_state = self.evaluate_resume_state()
-        prompt, metadata = self.context_manager.build(user_message)
+        prompt, metadata = self.context_manager.build(user_message, allow_tools=allow_tools)
         # 这里把“这轮 prompt 是怎么拼出来的”连同缓存相关状态一起记下来，
         # 后面 trace/report 才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
         metadata.update(
@@ -580,27 +586,6 @@ class Pico:
         child.session["memory"]["notes"] = [clip(self.history_text(), 300)]
         return "delegate_result:\n" + child.ask(task)
 
-    def tool_list_files(self, args):
-        return toolkit.tool_list_files(self.tool_context(), args)
-
-    def tool_read_file(self, args):
-        return toolkit.tool_read_file(self.tool_context(), args)
-
-    def tool_search(self, args):
-        return toolkit.tool_search(self.tool_context(), args)
-
-    def tool_run_shell(self, args):
-        return toolkit.tool_run_shell(self.tool_context(), args)
-
-    def tool_write_file(self, args):
-        return toolkit.tool_write_file(self.tool_context(), args)
-
-    def tool_patch_file(self, args):
-        return toolkit.tool_patch_file(self.tool_context(), args)
-
-    def tool_delegate(self, args):
-        return toolkit.tool_delegate(self.tool_context(), args)
-
     def approve(self, name, args):
         if self.read_only:
             return False
@@ -613,126 +598,6 @@ class Pico:
         except EOFError:
             return False
         return answer.strip().lower() in {"y", "yes"}
-
-    @staticmethod
-    def parse(raw):
-        """把模型原始输出解析成 runtime 可执行的动作或最终答案。
-
-        为什么存在：
-        模型输出首先是自然语言文本，而 runtime 需要的是结构化决策：
-        “这是工具调用”还是“这是最终答案”。如果没有这层解析，后面的工具校验、
-        审批和执行链路就没法可靠工作。
-
-        输入 / 输出：
-        - 输入：模型返回的原始文本 `raw`
-        - 输出：`(kind, payload)`，其中 `kind` 可能是 `tool`、`final`、`retry`
-
-        在 agent 链路里的位置：
-        它位于 `model_client.complete()` 之后、`run_tool()` 之前，是模型输出
-        进入平台控制流的第一道结构化关口。
-        """
-        raw = str(raw)
-        # 这里支持两种工具格式：
-        # 1. <tool>...</tool> 里包 JSON，适合简短调用
-        # 2. XML 风格属性/子标签，适合写文件这类多行内容
-        if "<tool>" in raw and ("<final>" not in raw or raw.find("<tool>") < raw.find("<final>")):
-            body = Pico.extract(raw, "tool")
-            try:
-                payload = json.loads(body)
-            except Exception:
-                return "retry", Pico.retry_notice("model returned malformed tool JSON")
-            if not isinstance(payload, dict):
-                return "retry", Pico.retry_notice("tool payload must be a JSON object")
-            if not str(payload.get("name", "")).strip():
-                return "retry", Pico.retry_notice("tool payload is missing a tool name")
-            args = payload.get("args", {})
-            if args is None:
-                payload["args"] = {}
-            elif not isinstance(args, dict):
-                return "retry", Pico.retry_notice()
-            return "tool", payload
-        if "<tool" in raw and ("<final>" not in raw or raw.find("<tool") < raw.find("<final>")):
-            payload = Pico.parse_xml_tool(raw)
-            if payload is not None:
-                return "tool", payload
-            return "retry", Pico.retry_notice()
-        if "<final>" in raw:
-            final = Pico.extract(raw, "final").strip()
-            if final:
-                return "final", final
-            return "retry", Pico.retry_notice("model returned an empty <final> answer")
-        raw = raw.strip()
-        if raw:
-            return "final", raw
-        return "retry", Pico.retry_notice("model returned an empty response")
-
-    @staticmethod
-    def retry_notice(problem=None):
-        prefix = "Runtime notice"
-        if problem:
-            prefix += f": {problem}"
-        else:
-            prefix += ": model returned malformed tool output"
-        return (
-            f"{prefix}. Reply with a valid <tool> call or a non-empty <final> answer. "
-            'For multi-line files, prefer <tool name="write_file" path="file.py"><content>...</content></tool>.'
-        )
-
-    @staticmethod
-    def parse_xml_tool(raw):
-        match = re.search(r"<tool(?P<attrs>[^>]*)>(?P<body>.*?)</tool>", raw, re.S)
-        if not match:
-            return None
-        attrs = Pico.parse_attrs(match.group("attrs"))
-        name = str(attrs.pop("name", "")).strip()
-        if not name:
-            return None
-
-        body = match.group("body")
-        args = dict(attrs)
-        for key in ("content", "old_text", "new_text", "command", "task", "pattern", "path"):
-            if f"<{key}>" in body:
-                args[key] = Pico.extract_raw(body, key)
-
-        body_text = body.strip("\n")
-        if name == "write_file" and "content" not in args and body_text:
-            args["content"] = body_text
-        if name == "delegate" and "task" not in args and body_text:
-            args["task"] = body_text.strip()
-        return {"name": name, "args": args}
-
-    @staticmethod
-    def parse_attrs(text):
-        attrs = {}
-        for match in re.finditer(r"""([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""", text):
-            attrs[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
-        return attrs
-
-    @staticmethod
-    def extract(text, tag):
-        start_tag = f"<{tag}>"
-        end_tag = f"</{tag}>"
-        start = text.find(start_tag)
-        if start == -1:
-            return text
-        start += len(start_tag)
-        end = text.find(end_tag, start)
-        if end == -1:
-            return text[start:].strip()
-        return text[start:end].strip()
-
-    @staticmethod
-    def extract_raw(text, tag):
-        start_tag = f"<{tag}>"
-        end_tag = f"</{tag}>"
-        start = text.find(start_tag)
-        if start == -1:
-            return text
-        start += len(start_tag)
-        end = text.find(end_tag, start)
-        if end == -1:
-            return text[start:]
-        return text[start:end]
 
     def reset(self):
         self.session["history"] = []

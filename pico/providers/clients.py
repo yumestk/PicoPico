@@ -1,467 +1,244 @@
-"""模型后端适配层。
-
-runtime 只关心一件事：给我一个 prompt，我拿回一段文本。
-不同 provider 在 HTTP 接口、响应结构、是否支持 prompt cache 上都有差异，
-这些差异都在这里被抹平成统一的 complete() 接口。
-"""
+"""Native tool protocols. Adapters preserve the blocks required for replay."""
 
 import json
 import time
-from http.client import RemoteDisconnected
 import urllib.error
 import urllib.request
+from http.client import RemoteDisconnected
 
-OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1"
+from .types import ModelProtocolError, ModelRequest, ModelResponse, ToolCall
+
+
+def _arguments(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value  # The executor rejects it and returns an error for this call ID.
+    return value
+
+
+def _usage(data):
+    usage = data.get('usage') or {}
+    details = usage.get('input_tokens_details') or usage.get('prompt_tokens_details') or {}
+    cached = int(details.get('cached_tokens') or usage.get('cache_read_input_tokens') or 0)
+    return {'input_tokens': usage.get('input_tokens', usage.get('prompt_tokens')),
+            'output_tokens': usage.get('output_tokens', usage.get('completion_tokens')),
+            'cached_tokens': cached, 'cache_hit': cached > 0,
+            'total_tokens': usage.get('total_tokens')}
+
+
+def _post(url, payload, headers, timeout):
+    request = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                    headers={'Content-Type': 'application/json', 'User-Agent': 'pico/0.1', **headers}, method='POST')
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read().decode('utf-8')
+            break
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode('utf-8', errors='replace')
+            if exc.code >= 500 and attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f'Model request failed with HTTP {exc.code}: {body}') from exc
+        except (urllib.error.URLError, RemoteDisconnected) as exc:
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f'Could not reach model endpoint: {url}') from exc
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        # Some Responses gateways send SSE even for a nonstreaming request.
+        data = None
+        for line in body.splitlines():
+            if line.startswith('data:') and line[5:].strip() != '[DONE]':
+                try:
+                    event = json.loads(line[5:])
+                except json.JSONDecodeError:
+                    continue
+                if event.get('type') == 'response.completed':
+                    data = event.get('response')
+                if event.get('type') in {'response.failed', 'error'}:
+                    raise ModelProtocolError('Provider returned a failed event') from exc
+        if data is None:
+            raise ModelProtocolError('Provider returned no complete JSON response') from exc
+    if not isinstance(data, dict):
+        raise ModelProtocolError('Provider response must be an object')
+    if data.get('error'):
+        raise RuntimeError(f'Model error: {data["error"]}')
+    return data
+
+
+def _validate_response(response):
+    ids = [call.id for call in response.tool_calls]
+    if any(not isinstance(call_id, str) or not call_id for call_id in ids) or len(ids) != len(set(ids)):
+        raise ModelProtocolError('Missing or duplicate tool call ID')
+    if not all(isinstance(call.name, str) and call.name for call in response.tool_calls):
+        raise ModelProtocolError('Tool call is missing its name')
+    return response
 
 
 class FakeModelClient:
+    protocol = 'fake'
+    model = 'scripted-deterministic'
+    supports_prompt_cache = False
+
     def __init__(self, outputs):
         self.outputs = list(outputs)
-        self.prompts = []
-        self.supports_prompt_cache = False
-        self.last_completion_metadata = {}
+        self.requests = []
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
-        self.prompts.append(prompt)
-        if not getattr(self, "last_completion_metadata", None):
-            self.last_completion_metadata = {}
+    def complete(self, request):
+        if not isinstance(request, ModelRequest):
+            raise TypeError('Expected ModelRequest')
+        self.requests.append(request)
         if not self.outputs:
-            raise RuntimeError("fake model ran out of outputs")
-        return self.outputs.pop(0)
+            raise RuntimeError('fake model ran out of outputs')
+        result = self.outputs.pop(0)
+        if not isinstance(result, ModelResponse):
+            raise TypeError('FakeModelClient outputs must be ModelResponse objects')
+        return _validate_response(result)
 
 
 class OllamaModelClient:
+    protocol = 'ollama-chat'
+    supports_prompt_cache = False
+
     def __init__(self, model, host, temperature, top_p, timeout):
-        self.model = model
-        self.host = host.rstrip("/")
-        self.temperature = temperature
-        self.top_p = top_p
-        self.timeout = timeout
-        self.supports_prompt_cache = False
-        self.last_completion_metadata = {}
+        self.model, self.host = model, host.rstrip('/')
+        self.temperature, self.top_p, self.timeout = temperature, top_p, timeout
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
-        # Ollama 当前不支持我们这里接入的 prompt cache 语义，
-        # 所以 runtime 传下来的缓存参数会被忽略。
-        self.last_completion_metadata = {}
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "raw": False,
-            "think": False,
-            "options": {
-                "num_predict": max_new_tokens,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-            },
-        }
-        request = urllib.request.Request(
-            self.host + "/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Ollama request failed with HTTP {exc.code}: {body}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                "Could not reach Ollama.\n"
-                "Make sure `ollama serve` is running and the model is available.\n"
-                f"Host: {self.host}\n"
-                f"Model: {self.model}"
-            ) from exc
-
-        if data.get("error"):
-            raise RuntimeError(f"Ollama error: {data['error']}")
-        return data.get("response", "")
-
-
-def _normalize_versioned_base_url(base_url):
-    base = str(base_url).rstrip("/")
-    if not base.endswith("/v1"):
-        base += "/v1"
-    return base
-
-
-def _extract_openai_text(data):
-    if data.get("output_text"):
-        return data["output_text"]
-
-    for item in data.get("output", []):
-        for content in item.get("content", []):
-            if isinstance(content, dict):
-                text = content.get("text")
-                if text:
-                    return text
-
-    choices = data.get("choices", [])
-    if choices:
-        message = choices[0].get("message", {})
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict):
-                    text = item.get("text")
-                    if text:
-                        return text
-
-    return ""
-
-
-def _extract_openai_text_from_sse(body_text):
-    last_response = None
-    deltas = []
-    for line in body_text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        payload = line[len("data:"):].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        event_type = event.get("type", "")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta")
-            if isinstance(delta, str):
-                deltas.append(delta)
-            continue
-        if event_type == "response.output_text.done":
-            text = event.get("text")
-            if isinstance(text, str) and text:
-                return text
-        part = event.get("part")
-        if isinstance(part, dict):
-            text = part.get("text")
-            if isinstance(text, str) and text:
-                return text
-        item = event.get("item")
-        if isinstance(item, dict):
-            text = _extract_openai_text({"output": [item]})
-            if text:
-                return text
-        response = event.get("response")
-        if isinstance(response, dict):
-            last_response = response
-            text = _extract_openai_text(response)
-            if text:
-                return text
-        text = _extract_openai_text(event)
-        if text:
-            return text
-    if deltas:
-        return "".join(deltas)
-    if isinstance(last_response, dict):
-        return _extract_openai_text(last_response)
-    return ""
-
-
-def _extract_openai_response_from_sse(body_text):
-    last_response = None
-    deltas = []
-    for line in body_text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        payload = line[len("data:"):].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        response = event.get("response")
-        if isinstance(response, dict):
-            last_response = response
-            if event.get("type") == "response.completed":
-                text = _extract_openai_text(response)
-                if text:
-                    return text, response
-        event_type = event.get("type", "")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta")
-            if isinstance(delta, str):
-                deltas.append(delta)
-        elif event_type == "response.output_text.done":
-            text = event.get("text")
-            if isinstance(text, str) and text:
-                return text, last_response or {}
-        else:
-            text = _extract_openai_text(event)
-            if text:
-                return text, event
-    if deltas:
-        return "".join(deltas), last_response or {}
-    if isinstance(last_response, dict):
-        return _extract_openai_text(last_response), last_response
-    return "", {}
-
-
-def _extract_usage_cache_details(data):
-    # 把不同 OpenAI-compatible 返回里的 usage 字段整理成统一结构，
-    # 让 runtime/trace/report 不需要关心 provider 细节。
-    usage = data.get("usage") or {}
-    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
-    output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
-    input_details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
-    cached_tokens = int(input_details.get("cached_tokens") or 0)
-    return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": usage.get("total_tokens"),
-        "cached_tokens": cached_tokens,
-        "cache_hit": cached_tokens > 0,
-    }
+    def complete(self, request):
+        messages = [{'role': 'system', 'content': request.system}]
+        for message in request.messages:
+            if message['role'] == 'assistant':
+                messages.append(message.get('provider_blocks', [])[0] if message.get('provider_blocks') else
+                                {'role': 'assistant', 'content': message['content'], 'tool_calls': [
+                                    {'function': {'name': c['name'], 'arguments': c['arguments']}}
+                                    for c in message.get('tool_calls', [])]})
+            elif message['role'] == 'tool':
+                messages.append({'role': 'tool', 'tool_name': message['name'], 'content': message['content']})
+            else:
+                messages.append({'role': message['role'], 'content': message['content']})
+        payload = {'model': self.model, 'messages': messages, 'stream': False, 'think': False,
+                   'tools': [{'type': 'function', 'function': t} for t in request.tools],
+                   'options': {'num_predict': request.max_new_tokens, 'temperature': self.temperature, 'top_p': self.top_p}}
+        data = _post(self.host + '/api/chat', payload, {}, self.timeout)
+        message = data.get('message')
+        if not isinstance(message, dict) or not data.get('done', False):
+            raise ModelProtocolError('Ollama returned an incomplete chat response')
+        calls = [ToolCall(c.get('function', {}).get('name'), _arguments(c.get('function', {}).get('arguments')))
+                 for c in message.get('tool_calls', [])]
+        reason = 'length' if data.get('done_reason') == 'length' else 'tool_calls' if calls else 'stop'
+        return _validate_response(ModelResponse(text=message.get('content', ''), tool_calls=calls, finish_reason=reason,
+                             usage={'input_tokens': data.get('prompt_eval_count'), 'output_tokens': data.get('eval_count')},
+                             provider_blocks=[message], protocol=self.protocol))
 
 
 class OpenAICompatibleModelClient:
+    protocol = 'openai-responses'
+
     def __init__(self, model, base_url, api_key, temperature, timeout):
-        self.model = model
-        self.base_url = _normalize_versioned_base_url(base_url)
-        self.api_key = api_key
-        self.temperature = temperature
-        self.timeout = timeout
-        # 当前只在明确支持 prompt cache 语义的后端上启用这条链路，
-        # 避免对不支持的后端传一个“看起来统一、其实没意义”的伪参数。
-        self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
-        self.last_completion_metadata = {}
+        self.model, self.base_url = model, base_url.rstrip('/')
+        self.api_key, self.temperature, self.timeout = api_key, temperature, timeout
+        self.supports_prompt_cache = any(host in self.base_url for host in ('openai.com', 'right.codes'))
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
-        """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
-
-        为什么存在：
-        runtime 不应该知道 HTTP 细节、SSE 细节、usage 字段长什么样，
-        更不应该自己去判断 prompt cache 参数要不要带。这个函数把这些后端
-        细节都包起来，对上层暴露统一的 `complete()` 行为。
-
-        输入 / 输出：
-        - 输入：完整 prompt、最大输出 token，以及可选的 prompt cache 参数
-        - 输出：模型最终文本；同时把 usage / cached_tokens 等元数据写进
-          `self.last_completion_metadata`
-
-        在 agent 链路里的位置：
-        它位于 `Pico.ask()` 的模型调用阶段，是稳定前缀缓存复用链路真正
-        落到 provider API 的地方。
-        """
-        self.last_completion_metadata = {}
-        payload = {
-            "model": self.model,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": prompt,
-                        }
-                    ],
-                }
-            ],
-            "max_output_tokens": max_new_tokens,
-            "stream": False,
-        }
+    def complete(self, request):
+        items = []
+        for message in request.messages:
+            if message['role'] == 'assistant':
+                if message.get('provider_blocks'):
+                    items.extend(message['provider_blocks'])
+                else:
+                    if message['content']:
+                        items.append({'role': 'assistant', 'content': message['content']})
+                    items.extend({'type': 'function_call', 'call_id': c['id'], 'name': c['name'],
+                                  'arguments': json.dumps(c['arguments'])} for c in message.get('tool_calls', []))
+            elif message['role'] == 'tool':
+                items.append({'type': 'function_call_output', 'call_id': message['call_id'], 'output': message['content']})
+            else:
+                items.append({'role': message['role'], 'content': message['content']})
+        payload = {'model': self.model, 'instructions': request.system, 'input': items,
+                   'tools': [{'type': 'function', **t, 'strict': False} for t in request.tools],
+                   'tool_choice': 'auto' if request.tools else 'none', 'store': False,
+                   'include': ['reasoning.encrypted_content'], 'max_output_tokens': request.max_new_tokens, 'stream': False}
         if self.temperature is not None:
-            payload["temperature"] = self.temperature
-        # runtime 传入的是“稳定前缀”的签名，而不是整段 prompt 的签名。
-        # 这样缓存复用针对的是稳定段，不会因为动态 history 每轮变化而失效。
-        if self.supports_prompt_cache and prompt_cache_key:
-            payload["prompt_cache_key"] = prompt_cache_key
-        if self.supports_prompt_cache and prompt_cache_retention:
-            payload["prompt_cache_retention"] = prompt_cache_retention
-
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": OPENAI_COMPATIBLE_USER_AGENT,
-        }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        request = urllib.request.Request(
-            self.base_url + "/responses",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        attempts = 3
-        for attempt in range(attempts):
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    body_text = response.read().decode("utf-8")
-                    headers = getattr(response, "headers", {}) or {}
-                    content_type = headers.get("Content-Type", "")
-                break
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                if exc.code >= 500 and attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(f"OpenAI-compatible request failed with HTTP {exc.code}: {body}") from exc
-            except (urllib.error.URLError, RemoteDisconnected) as exc:
-                if attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(
-                    "Could not reach the OpenAI-compatible backend.\n"
-                    f"Base URL: {self.base_url}\n"
-                    f"Model: {self.model}"
-                ) from exc
-
-        # 有些兼容后端返回普通 JSON，有些返回 SSE。
-        # 这里两种都接住，并尽量统一抽取文本和 usage/cache 元数据。
-        if content_type.startswith("text/event-stream") or body_text.lstrip().startswith("data:"):
-            text, response_data = _extract_openai_response_from_sse(body_text)
-            if isinstance(response_data, dict) and response_data:
-                # 这些元数据会一路传回 runtime，进入 trace 和 report，
-                # 用来观察 prompt cache 是否真的命中。
-                self.last_completion_metadata = {
-                    "prompt_cache_supported": self.supports_prompt_cache,
-                    "prompt_cache_key": prompt_cache_key,
-                    "prompt_cache_retention": prompt_cache_retention,
-                    **_extract_usage_cache_details(response_data),
-                }
-            if text:
-                return text
-            raise RuntimeError("OpenAI-compatible error: could not extract text from event stream response")
-
-        try:
-            data = json.loads(body_text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "OpenAI-compatible error: backend returned non-JSON content that could not be parsed"
-            ) from exc
-        if data.get("error"):
-            raise RuntimeError(f"OpenAI-compatible error: {data['error']}")
-        self.last_completion_metadata = {
-            "prompt_cache_supported": self.supports_prompt_cache,
-            "prompt_cache_key": prompt_cache_key,
-            "prompt_cache_retention": prompt_cache_retention,
-            **_extract_usage_cache_details(data),
-        }
-        return _extract_openai_text(data)
-
-
-def _extract_anthropic_text(data):
-    texts = []
-    for item in data.get("content", []):
-        if isinstance(item, dict) and item.get("type") == "text":
-            text = item.get("text")
-            if isinstance(text, str) and text:
-                texts.append(text)
-    return "\n".join(texts)
-
-
-def _extract_anthropic_metadata(data):
-    content_block_types = []
-    for item in data.get("content", []):
-        if isinstance(item, dict):
-            block_type = str(item.get("type", "")).strip()
-            if block_type:
-                content_block_types.append(block_type)
-    usage = data.get("usage") or {}
-    return {
-        "stop_reason": str(data.get("stop_reason", "") or ""),
-        "content_block_types": content_block_types,
-        "input_tokens": usage.get("input_tokens"),
-        "output_tokens": usage.get("output_tokens"),
-    }
+            payload['temperature'] = self.temperature
+        if self.supports_prompt_cache and request.prompt_cache_key:
+            payload['prompt_cache_key'] = request.prompt_cache_key
+            payload['prompt_cache_retention'] = 'in_memory'
+        data = _post(self.base_url + '/responses', payload, {'Authorization': 'Bearer ' + self.api_key} if self.api_key else {}, self.timeout)
+        blocks = data.get('output', [])
+        if not isinstance(blocks, list):
+            raise ModelProtocolError('Responses output must be an array')
+        calls, texts, refused = [], [], False
+        for block in blocks:
+            if block.get('type') == 'function_call':
+                calls.append(ToolCall(block.get('name'), _arguments(block.get('arguments')), block.get('call_id')))
+            elif block.get('type') == 'message':
+                for part in block.get('content', []):
+                    if part.get('type') == 'output_text':
+                        texts.append(part.get('text', ''))
+                    elif part.get('type') == 'refusal':
+                        texts.append(part.get('refusal', ''))
+                        refused = True
+        status = data.get('status', 'completed')
+        reason = 'refusal' if refused else 'tool_calls' if calls else 'stop'
+        if status != 'completed':
+            reason = 'length' if data.get('incomplete_details', {}).get('reason') == 'max_output_tokens' else status
+        return _validate_response(ModelResponse(text='\n'.join(texts), tool_calls=calls, finish_reason=reason,
+                                               usage={**_usage(data), 'prompt_cache_supported': self.supports_prompt_cache},
+                                               provider_blocks=blocks, protocol=self.protocol))
 
 
 class AnthropicCompatibleModelClient:
+    protocol = 'anthropic-messages'
+    supports_prompt_cache = False
+
     def __init__(self, model, base_url, api_key, temperature, timeout, thinking=None):
         self.model = model
-        self.base_url = _normalize_versioned_base_url(base_url)
-        self.api_key = api_key
-        self.temperature = temperature
-        self.timeout = timeout
+        self.base_url = base_url.rstrip('/')
+        if not self.base_url.endswith('/v1'):
+            self.base_url += '/v1'
+        self.api_key, self.temperature, self.timeout = api_key, temperature, timeout
         self.thinking = dict(thinking) if thinking else None
-        self.supports_prompt_cache = False
-        self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
-        # 为了保持统一接口，runtime 仍然会传缓存参数进来；
-        # 这里只是显式丢弃，因为当前 Anthropic-compatible 路径没有接缓存复用。
-        del prompt_cache_key, prompt_cache_retention
-        self.last_completion_metadata = {}
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        }
-                    ],
-                }
-            ],
-            "max_tokens": max_new_tokens,
-            "stream": False,
-        }
+    def complete(self, request):
+        messages = []
+        for message in request.messages:
+            if message['role'] == 'assistant':
+                blocks = message.get('provider_blocks') or (
+                    ([{'type': 'text', 'text': message['content']}] if message['content'] else []) +
+                    [{'type': 'tool_use', 'id': c['id'], 'name': c['name'], 'input': c['arguments']}
+                     for c in message.get('tool_calls', [])])
+                messages.append({'role': 'assistant', 'content': blocks})
+            elif message['role'] == 'tool':
+                block = {'type': 'tool_result', 'tool_use_id': message['call_id'], 'content': message['content'],
+                         'is_error': message.get('status', 'ok') != 'ok'}
+                if messages and messages[-1]['role'] == 'user' and isinstance(messages[-1]['content'], list):
+                    messages[-1]['content'].append(block)
+                else:
+                    messages.append({'role': 'user', 'content': [block]})
+            else:
+                messages.append({'role': message['role'], 'content': message['content']})
+        payload = {'model': self.model, 'system': request.system, 'messages': messages,
+                   'tools': [{'name': t['name'], 'description': t['description'], 'input_schema': t['parameters']} for t in request.tools],
+                   'tool_choice': {'type': 'auto' if request.tools else 'none'},
+                   'max_tokens': request.max_new_tokens, 'stream': False}
         if self.temperature is not None:
-            payload["temperature"] = self.temperature
+            payload['temperature'] = self.temperature
         if self.thinking is not None:
-            payload["thinking"] = dict(self.thinking)
-
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-        }
-
-        request = urllib.request.Request(
-            self.base_url + "/messages",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        attempts = 3
-        for attempt in range(attempts):
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    body_text = response.read().decode("utf-8")
-                break
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                if exc.code >= 500 and attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(f"Anthropic-compatible request failed with HTTP {exc.code}: {body}") from exc
-            except (urllib.error.URLError, RemoteDisconnected) as exc:
-                if attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(
-                    "Could not reach the Anthropic-compatible backend.\n"
-                    f"Base URL: {self.base_url}\n"
-                    f"Model: {self.model}"
-                ) from exc
-
-        try:
-            data = json.loads(body_text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "Anthropic-compatible error: backend returned non-JSON content that could not be parsed"
-            ) from exc
-        if data.get("error"):
-            raise RuntimeError(f"Anthropic-compatible error: {data['error']}")
-        self.last_completion_metadata = _extract_anthropic_metadata(data)
-        text = _extract_anthropic_text(data)
-        if text:
-            return text
-        stop_reason = self.last_completion_metadata["stop_reason"] or "unknown"
-        content_types = ",".join(self.last_completion_metadata["content_block_types"]) or "none"
-        raise RuntimeError(
-            "Anthropic-compatible response ended before a text block "
-            f"(stop_reason={stop_reason}, content_types={content_types})"
-        )
+            payload['thinking'] = self.thinking
+        data = _post(self.base_url + '/messages', payload, {'x-api-key': self.api_key, 'anthropic-version': '2023-06-01'}, self.timeout)
+        blocks = data.get('content', [])
+        if not isinstance(blocks, list):
+            raise ModelProtocolError('Messages content must be an array')
+        texts = [b.get('text', '') for b in blocks if b.get('type') == 'text']
+        calls = [ToolCall(b.get('name'), b.get('input'), b.get('id')) for b in blocks if b.get('type') == 'tool_use']
+        reason = {'end_turn': 'stop', 'tool_use': 'tool_calls', 'max_tokens': 'length',
+                  'refusal': 'refusal', 'stop_sequence': 'stop'}.get(data.get('stop_reason'), 'protocol_error')
+        return _validate_response(ModelResponse(text='\n'.join(texts), tool_calls=calls, finish_reason=reason,
+                                               usage={**_usage(data), 'stop_reason': data.get('stop_reason'),
+                                                      'content_block_types': [b.get('type') for b in blocks]},
+                                               provider_blocks=blocks, protocol=self.protocol))

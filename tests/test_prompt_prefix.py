@@ -30,7 +30,7 @@ def test_build_prompt_prefix_renders_tools_and_workspace_metadata(tmp_path):
 
     assert "You are pico" in prefix.text
     assert "Tools:" in prefix.text
-    assert "- read_file(" in prefix.text
+    assert "- read_file:" in prefix.text
     assert "Workspace:" in prefix.text
     assert prefix.hash
     assert prefix.workspace_fingerprint == workspace.fingerprint()

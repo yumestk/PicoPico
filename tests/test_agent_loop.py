@@ -1,3 +1,4 @@
+from pico.providers.types import ModelResponse, ToolCall
 import json
 
 import pytest
@@ -24,8 +25,8 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":1}}</tool>',
-            "<final>Done.</final>",
+            ModelResponse(tool_calls=[ToolCall('read_file', {'path': 'hello.txt', 'start': 1, 'end': 1})]),
+            ModelResponse(text='Done.'),
         ],
     )
 
@@ -37,7 +38,7 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
 
 
 def test_pico_ask_delegates_to_agent_loop(tmp_path):
-    agent = build_agent(tmp_path, ["<final>Facade works.</final>"])
+    agent = build_agent(tmp_path, [ModelResponse(text='Facade works.')])
 
     assert agent.ask("Use facade") == "Facade works."
 
@@ -45,12 +46,12 @@ def test_pico_ask_delegates_to_agent_loop(tmp_path):
 def test_agent_loop_reserves_a_final_answer_after_tool_budget_is_exhausted(tmp_path):
     (tmp_path / "facts.txt").write_text("one\ntwo\nthree\nfour\nfive\nsix\n", encoding="utf-8")
     tool_outputs = [
-        f'<tool>{{"name":"read_file","args":{{"path":"facts.txt","start":{line},"end":{line}}}}}</tool>'
+        ModelResponse(tool_calls=[ToolCall('read_file', {'path': 'facts.txt', 'start': line, 'end': line})])
         for line in range(1, 7)
     ]
     agent = build_agent(
         tmp_path,
-        [*tool_outputs, "<final>All six facts were inspected.</final>"],
+        [*tool_outputs, ModelResponse(text='All six facts were inspected.')],
         max_steps=6,
     )
 
@@ -71,10 +72,7 @@ def test_agent_loop_reserves_a_final_answer_after_tool_budget_is_exhausted(tmp_p
 def test_agent_loop_persists_model_failure_before_reraising(tmp_path):
     class FailingModelClient:
         supports_prompt_cache = False
-        last_completion_metadata = {
-            "stop_reason": "max_tokens",
-            "content_block_types": ["thinking"],
-        }
+
 
         def complete(self, *args, **kwargs):
             raise RuntimeError(
@@ -96,4 +94,59 @@ def test_agent_loop_persists_model_failure_before_reraising(tmp_path):
     assert agent.run_store.report_path(state).exists()
     report = agent.run_store.load_report(state.run_id)
     assert report["stop_reason"] == "model_error"
-    assert report["prompt_metadata"]["stop_reason"] == "max_tokens"
+    assert "ended before a text block" in report["final_answer"]
+
+
+def test_multiple_calls_are_sequential_and_text_does_not_finish(tmp_path):
+    agent = build_agent(tmp_path, [
+        ModelResponse(text='I will read twice', tool_calls=[
+            ToolCall('read_file', {'path': 'README.md'}, 'first'),
+            ToolCall('read_file', {'path': 'README.md', 'end': 1}, 'second')]),
+        ModelResponse(text='Both done')])
+    assert agent.ask('read') == 'Both done'
+    results = [m for m in agent.session['history'] if m['role'] == 'tool']
+    assert [m['call_id'] for m in results] == ['first', 'second']
+    assert agent.current_task_state.tool_steps == 2
+    assert agent.model_client.requests[1].messages[-3]['tool_calls'][0]['id'] == 'first'
+
+
+def test_batch_budget_rejects_remaining_calls_and_disables_tools(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse(tool_calls=[
+        ToolCall('write_file', {'path': 'one.txt', 'content': 'one'}),
+        ToolCall('write_file', {'path': 'two.txt', 'content': 'two'})]), ModelResponse(text='Only one written')], max_steps=1)
+    assert agent.ask('write files') == 'Only one written'
+    assert (tmp_path / 'one.txt').exists()
+    assert not (tmp_path / 'two.txt').exists()
+    assert agent.current_task_state.tool_steps == 1
+    assert agent.model_client.requests[-1].tools == []
+    results = [m for m in agent.session['history'] if m['role'] == 'tool']
+    assert results[-1]['result']['error_code'] == 'budget_exceeded'
+
+
+def test_truncated_response_never_executes_its_calls(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse(text='partial', finish_reason='length', tool_calls=[
+        ToolCall('write_file', {'path': 'bad.txt', 'content': 'bad'})])])
+    assert agent.ask('write') == 'partial'
+    assert agent.current_task_state.status == 'failed'
+    assert not (tmp_path / 'bad.txt').exists()
+    assert agent.last_completion_metadata['finish_reason'] == 'length'
+
+
+def test_unknown_tool_returns_correlated_error(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse(tool_calls=[ToolCall('unknown', {}, 'bad')]), ModelResponse(text='Handled')])
+    assert agent.ask('inspect') == 'Handled'
+    result = next(m for m in agent.session['history'] if m['role'] == 'tool')
+    assert result['call_id'] == 'bad'
+    assert result['result']['error_code'] == 'unknown_tool'
+
+
+def test_old_session_and_changed_protocol_are_explicit_errors(tmp_path):
+    agent = build_agent(tmp_path, [])
+    session = dict(agent.session)
+    session.pop('format')
+    with pytest.raises(ValueError, match='Unsupported session format'):
+        Pico(agent.model_client, agent.workspace, agent.session_store, session=session)
+    session['format'] = 'native-v1'
+    session['provider_protocol'] = 'another-protocol'
+    with pytest.raises(ValueError, match='protocol changed'):
+        Pico(agent.model_client, agent.workspace, agent.session_store, session=session)

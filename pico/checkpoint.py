@@ -5,7 +5,7 @@ import uuid
 from .features import memory as memorylib
 from .workspace import clip, now
 
-CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
+CHECKPOINT_SCHEMA_VERSION = "native-v1"
 CHECKPOINT_NONE_STATUS = "no-checkpoint"
 CHECKPOINT_FULL_VALID_STATUS = "full-valid"
 CHECKPOINT_PARTIAL_STALE_STATUS = "partial-stale"

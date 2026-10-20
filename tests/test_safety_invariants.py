@@ -1,3 +1,4 @@
+from pico.providers.types import ModelResponse, ToolCall
 import os
 import shlex
 import sys
@@ -56,6 +57,7 @@ def test_risky_tool_deny_behavior(tmp_path):
 
 def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
     class DummyModelClient:
+        protocol = "fake"
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
@@ -86,6 +88,7 @@ def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
 
 def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
     class DummyModelClient:
+        protocol = "fake"
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
@@ -105,6 +108,7 @@ def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
 
 def test_cli_build_agent_loads_project_env_secrets_before_redaction_setup(tmp_path):
     class DummyModelClient:
+        protocol = "fake"
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
@@ -122,6 +126,7 @@ def test_cli_build_agent_loads_project_env_secrets_before_redaction_setup(tmp_pa
 
 def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
     class DummyModelClient:
+        protocol = "fake"
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
@@ -156,26 +161,6 @@ def test_run_shell_uses_allowlisted_environment_only(tmp_path):
     assert "missing" in result.content
 
 
-def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
-    agent = build_agent(tmp_path, [], approval_policy="auto")
-
-    with patch("pico.tools.subprocess.run") as fake_run:
-        fake_run.return_value = type(
-            "Result",
-            (),
-            {"returncode": 0, "stdout": "toolkit-shell\n", "stderr": ""},
-        )()
-        shell_result = agent.tool_run_shell({"command": "echo bypass", "timeout": 20})
-
-    assert "toolkit-shell" in shell_result["stdout"]
-    fake_run.assert_called_once()
-    assert agent.tool_run_shell.__func__.__module__ == "pico.runtime"
-
-    with patch("pico.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:
-        delegate_result = agent.tool_delegate({"task": "inspect README.md", "max_steps": 2})
-
-    assert delegate_result == "toolkit-delegate"
-    fake_delegate.assert_called_once()
 
 
 def test_delegate_depth_limit_is_enforced(tmp_path):
@@ -194,10 +179,10 @@ def test_delegate_child_is_read_only(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"delegate","args":{"task":"write a file","max_steps":2}}</tool>',
-            '<tool>{"name":"write_file","args":{"path":"child-was-not-allowed.txt","content":"nope"}}</tool>',
-            "<final>child done</final>",
-            "<final>parent done</final>",
+            ModelResponse(tool_calls=[ToolCall('delegate', {'task': 'write a file', 'max_steps': 2})]),
+            ModelResponse(tool_calls=[ToolCall('write_file', {'path': 'child-was-not-allowed.txt', 'content': 'nope'})]),
+            ModelResponse(text='child done'),
+            ModelResponse(text='parent done'),
         ],
     )
 

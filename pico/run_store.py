@@ -68,7 +68,8 @@ class RunStore:
     def load_report(self, task_id):
         return json.loads(self.report_path(task_id).read_text(encoding="utf-8"))
 
-    def _write_json_atomic(self, path, payload):
+    @staticmethod
+    def _write_json_atomic(path, payload):
         # 原子写：先写临时文件，再 replace。
         # 这样即使中途异常，也不容易留下半截 JSON。
         with tempfile.NamedTemporaryFile(

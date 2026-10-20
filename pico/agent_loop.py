@@ -1,9 +1,12 @@
-"""Agent control loop extracted from the runtime facade."""
+"""Sequential native tool loop with explicit budgets and durable boundaries."""
 
+import json
 import time
 
-from .checkpoint import CHECKPOINT_NONE_STATUS, CHECKPOINT_PARTIAL_STALE_STATUS, CHECKPOINT_WORKSPACE_MISMATCH_STATUS
+from .checkpoint import CHECKPOINT_NONE_STATUS
+from .providers.types import ModelProtocolError
 from .task_state import TaskState
+from .tool_result import ToolExecutionResult
 from .workspace import clip, now
 
 
@@ -11,315 +14,102 @@ class AgentLoop:
     def __init__(self, agent):
         self.agent = agent
 
-    def _persist_model_failure(self, task_state, user_message, exc, run_started_at, prompt_metadata):
+    def _finish(self, state, request, started, answer, reason='final_answer_returned'):
         agent = self.agent
-        error_text = agent.redact_text(str(exc))
-        final = f"Model request failed: {error_text}"
-        task_state.stop_model_error(final)
-        agent.run_store.write_task_state(task_state)
-        checkpoint = agent.create_checkpoint(task_state, user_message, trigger="model_error")
-        agent.run_store.write_task_state(task_state)
-        agent.emit_trace(
-            task_state,
-            "model_failed",
-            {
-                "error": error_text,
-                "completion_metadata": dict(agent.last_completion_metadata),
-            },
-        )
-        agent.emit_trace(
-            task_state,
-            "run_finished",
-            {
-                "status": task_state.status,
-                "stop_reason": task_state.stop_reason,
-                "final_answer": final,
-                "checkpoint_id": checkpoint["checkpoint_id"],
-                "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-            },
-        )
-        agent.last_prompt_metadata = dict(prompt_metadata)
-        agent.run_store.write_report(task_state, agent.redact_artifact(agent.build_report(task_state)))
+        if reason == 'final_answer_returned':
+            state.finish_success(answer)
+            agent.promote_durable_memory(request, answer)
+        elif reason == 'model_error':
+            state.stop_model_error(answer)
+        else:
+            state.stop(reason, final_answer=answer)
+        agent.record({'role': 'assistant', 'content': answer, 'created_at': now()})
+        checkpoint = agent.create_checkpoint(state, request, trigger=reason)
+        agent.run_store.write_task_state(state)
+        agent.emit_trace(state, 'checkpoint_created', {'checkpoint_id': checkpoint['checkpoint_id'], 'trigger': reason})
+        agent.emit_trace(state, 'run_finished', {'status': state.status, 'stop_reason': reason, 'final_answer': answer,
+                                               'run_duration_ms': int((time.monotonic() - started) * 1000)})
+        agent.run_store.write_report(state, agent.redact_artifact(agent.build_report(state)))
+        return answer
 
-    def _request_model(self, task_state, user_message, prompt, prompt_metadata, run_started_at, purpose):
+    def _record_result(self, state, call, result):
         agent = self.agent
-        agent.emit_trace(
-            task_state,
-            "model_requested",
-            {
-                "attempts": task_state.attempts,
-                "tool_steps": task_state.tool_steps,
-                "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
-                "purpose": purpose,
-            },
-        )
-        prompt_cache_key = None
-        prompt_cache_retention = None
-        if getattr(agent.model_client, "supports_prompt_cache", False):
-            prompt_cache_key = prompt_metadata.get("prompt_cache_key")
-            prompt_cache_retention = "in_memory"
-        model_started_at = time.monotonic()
-        try:
-            raw = agent.model_client.complete(
-                prompt,
-                agent.max_new_tokens,
-                prompt_cache_key=prompt_cache_key,
-                prompt_cache_retention=prompt_cache_retention,
-            )
-        except Exception as exc:
-            completion_metadata = dict(getattr(agent.model_client, "last_completion_metadata", {}) or {})
-            if completion_metadata:
-                prompt_metadata.update(completion_metadata)
-            agent.last_completion_metadata = completion_metadata
-            agent.last_prompt_metadata = prompt_metadata
-            self._persist_model_failure(task_state, user_message, exc, run_started_at, prompt_metadata)
-            raise
-        completion_metadata = dict(getattr(agent.model_client, "last_completion_metadata", {}) or {})
-        if completion_metadata:
-            prompt_metadata.update(completion_metadata)
-        agent.last_completion_metadata = completion_metadata
-        agent.last_prompt_metadata = prompt_metadata
-        kind, payload = agent.parse(raw)
-        agent.emit_trace(
-            task_state,
-            "model_parsed",
-            {
-                "kind": kind,
-                "completion_metadata": completion_metadata,
-                "duration_ms": int((time.monotonic() - model_started_at) * 1000),
-                "purpose": purpose,
-            },
-        )
-        return raw, kind, payload
-
-    def _finish_success(self, task_state, user_message, final, run_started_at):
-        agent = self.agent
-        agent.record({"role": "assistant", "content": final, "created_at": now()})
-        task_state.finish_success(final)
-        agent.promote_durable_memory(user_message, final)
-        checkpoint = agent.create_checkpoint(task_state, user_message, trigger="run_finished")
-        agent.run_store.write_task_state(task_state)
-        agent.emit_trace(
-            task_state,
-            "checkpoint_created",
-            {
-                "checkpoint_id": checkpoint["checkpoint_id"],
-                "trigger": "run_finished",
-            },
-        )
-        agent.emit_trace(
-            task_state,
-            "run_finished",
-            {
-                "status": task_state.status,
-                "stop_reason": task_state.stop_reason,
-                "final_answer": final,
-                "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-            },
-        )
-        agent.run_store.write_report(task_state, agent.redact_artifact(agent.build_report(task_state)))
-        return final
+        content = json.dumps({'status': result.status, 'output': result.content, 'error_code': result.error_code}, ensure_ascii=False)
+        agent.record({'role': 'tool', 'call_id': call.id, 'name': call.name, 'args': call.arguments,
+                      'content': content, 'result': result.to_dict(), 'created_at': now()})
+        agent.emit_trace(state, 'tool_executed', {'call_id': call.id, 'name': call.name, 'args': call.arguments,
+                                                'result': clip(result.content, 500), **result.metadata,
+                                                'tool_status': result.status, 'tool_error_code': result.error_code})
 
     def run(self, user_message):
         agent = self.agent
-        run_started_at = time.monotonic()
+        started = time.monotonic()
+        state = TaskState.create(run_id=agent.new_run_id(), task_id=agent.new_task_id(), user_request=user_message)
+        state.resume_status = agent.resume_state.get('status', CHECKPOINT_NONE_STATUS)
+        agent.current_task_state = state
+        agent.current_run_dir = agent.run_store.start_run(state)
+        agent.last_completion_metadata = {}
         agent.memory.set_task_summary(user_message)
-        agent.record({"role": "user", "content": user_message, "created_at": now()})
-
-        task_state = TaskState.create(run_id=agent.new_run_id(), task_id=agent.new_task_id(), user_request=user_message)
-        task_state.resume_status = agent.resume_state.get("status", CHECKPOINT_NONE_STATUS)
-        agent.current_task_state = task_state
-        agent.current_run_dir = agent.run_store.start_run(task_state)
-        agent.emit_trace(
-            task_state,
-            "run_started",
-            {
-                "task_id": task_state.task_id,
-                "user_request": clip(user_message, 300),
-            },
-        )
-
-        tool_steps = 0
-        attempts = 0
+        agent.record({'role': 'user', 'content': user_message, 'created_at': now()})
+        agent.emit_trace(state, 'run_started', {'task_id': state.task_id, 'user_request': clip(user_message, 300)})
         max_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
-
-        # 这是 agent 的主循环，可以按“感知 -> 决策 -> 行动 -> 记录”来理解：
-        # 1. 感知：重新组 prompt，把当前状态整理给模型看
-        # 2. 决策：让模型返回一个工具调用，或一个最终答案
-        # 3. 行动：如果是工具调用，就执行工具
-        # 4. 记录：把结果写回 history / task_state / trace / memory
-        # 然后进入下一轮，直到停机条件满足
-        while tool_steps < agent.max_steps and attempts < max_attempts:
-            attempts += 1
-            task_state.record_attempt()
-            agent.run_store.write_task_state(task_state)
-            prompt_started_at = time.monotonic()
-            prompt, prompt_metadata = agent._build_prompt_and_metadata(user_message)
-            agent.emit_trace(
-                task_state,
-                "prompt_built",
-                {
-                    "prompt_metadata": prompt_metadata,
-                    "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
-                },
-            )
-            if prompt_metadata.get("resume_status") == CHECKPOINT_PARTIAL_STALE_STATUS:
-                checkpoint = agent.create_checkpoint(task_state, user_message, trigger="freshness_mismatch")
-                agent.run_store.write_task_state(task_state)
-                agent.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "freshness_mismatch",
-                    },
-                )
-            elif prompt_metadata.get("resume_status") == CHECKPOINT_WORKSPACE_MISMATCH_STATUS:
-                agent.emit_trace(
-                    task_state,
-                    "runtime_identity_mismatch",
-                    {
-                        "fields": list(prompt_metadata.get("runtime_identity_mismatch_fields", [])),
-                    },
-                )
-                checkpoint = agent.create_checkpoint(task_state, user_message, trigger="workspace_mismatch")
-                agent.run_store.write_task_state(task_state)
-                agent.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "workspace_mismatch",
-                    },
-                )
-            if prompt_metadata.get("budget_reductions"):
-                checkpoint = agent.create_checkpoint(task_state, user_message, trigger="context_reduction")
-                agent.run_store.write_task_state(task_state)
-                agent.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "context_reduction",
-                    },
-                )
-            raw, kind, payload = self._request_model(
-                task_state,
-                user_message,
-                prompt,
-                prompt_metadata,
-                run_started_at,
-                purpose="action",
-            )
-
-            if kind == "tool":
-                tool_steps += 1
-                name = payload.get("name", "")
-                args = payload.get("args", {})
-                task_state.record_tool(name)
-                tool_started_at = time.monotonic()
-                tool_result = agent.execute_tool(name, args)
-                result = tool_result.content
-                agent.record(
-                    {
-                        "role": "tool",
-                        "name": name,
-                        "args": args,
-                        "content": result,
-                        "created_at": now(),
-                    }
-                )
-                agent.run_store.write_task_state(task_state)
-                agent.emit_trace(
-                    task_state,
-                    "tool_executed",
-                    {
-                        "name": name,
-                        "args": args,
-                        "result": clip(result, 500),
-                        "duration_ms": int((time.monotonic() - tool_started_at) * 1000),
-                        **dict(tool_result.metadata or {}),
-                    },
-                )
-                checkpoint = agent.create_checkpoint(task_state, user_message, trigger="tool_executed")
-                agent.run_store.write_task_state(task_state)
-                agent.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "tool_executed",
-                    },
-                )
-                continue
-
-            if kind == "retry":
-                agent.record({"role": "assistant", "content": payload, "created_at": now()})
-                agent.run_store.write_task_state(task_state)
-                continue
-
-            final = (payload or raw).strip()
-            return self._finish_success(task_state, user_message, final, run_started_at)
-
-        if tool_steps >= agent.max_steps:
-            task_state.record_attempt()
-            agent.run_store.write_task_state(task_state)
-            prompt_started_at = time.monotonic()
-            prompt, prompt_metadata = agent._build_prompt_and_metadata(user_message)
-            prompt += (
-                "\n\nRuntime notice: the tool budget is exhausted. Do not call another tool. "
-                "Use the evidence already present in the tool history and return exactly one "
-                "non-empty <final>...</final> answer."
-            )
-            prompt_metadata["finalization"] = True
-            agent.emit_trace(
-                task_state,
-                "prompt_built",
-                {
-                    "prompt_metadata": prompt_metadata,
-                    "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
-                    "purpose": "finalization",
-                },
-            )
-            raw, kind, payload = self._request_model(
-                task_state,
-                user_message,
-                prompt,
-                prompt_metadata,
-                run_started_at,
-                purpose="finalization",
-            )
-            if kind == "final":
-                final = (payload or raw).strip()
-                return self._finish_success(task_state, user_message, final, run_started_at)
-
-        if attempts >= max_attempts and tool_steps < agent.max_steps:
-            final = "Stopped after too many malformed model responses without a valid tool call or final answer."
-            task_state.stop_retry_limit(final)
-        else:
-            final = "Stopped after reaching the step limit without a final answer."
-            task_state.stop_step_limit(final)
-        agent.record({"role": "assistant", "content": final, "created_at": now()})
-        agent.promote_durable_memory(user_message, final)
-        agent.run_store.write_task_state(task_state)
-        checkpoint = agent.create_checkpoint(task_state, user_message, trigger=task_state.stop_reason or "run_stopped")
-        agent.emit_trace(
-            task_state,
-            "checkpoint_created",
-            {
-                "checkpoint_id": checkpoint["checkpoint_id"],
-                "trigger": task_state.stop_reason or "run_stopped",
-            },
-        )
-        agent.emit_trace(
-            task_state,
-            "run_finished",
-            {
-                "status": task_state.status,
-                "stop_reason": task_state.stop_reason,
-                "final_answer": final,
-                "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-            },
-        )
-        agent.run_store.write_report(task_state, agent.redact_artifact(agent.build_report(task_state)))
-        return final
+        try:
+            while state.attempts < max_attempts:
+                finalization = state.tool_steps >= agent.max_steps
+                state.record_attempt()
+                agent.run_store.write_task_state(state)
+                request, metadata = agent._build_prompt_and_metadata(user_message, allow_tools=not finalization)
+                if finalization:
+                    request.system += '\nTool budget exhausted. Summarize available evidence without further tools.'
+                    metadata['finalization'] = True
+                agent.last_prompt_metadata = metadata
+                agent.emit_trace(state, 'prompt_built', {'prompt_metadata': metadata})
+                status = metadata.get('resume_status')
+                trigger = 'freshness_mismatch' if status == 'partial-stale' else 'workspace_mismatch' if status == 'workspace-mismatch' else 'context_reduction' if metadata.get('budget_reductions') else None
+                if status == 'workspace-mismatch':
+                    agent.emit_trace(state, 'runtime_identity_mismatch', {'fields': metadata.get('runtime_identity_mismatch_fields', [])})
+                if trigger:
+                    checkpoint = agent.create_checkpoint(state, user_message, trigger)
+                    agent.emit_trace(state, 'checkpoint_created', {'checkpoint_id': checkpoint['checkpoint_id'], 'trigger': trigger})
+                purpose = 'finalization' if finalization else 'action'
+                agent.emit_trace(state, 'model_requested', {'attempts': state.attempts, 'tool_steps': state.tool_steps, 'purpose': purpose})
+                response = agent.model_client.complete(request)
+                agent.last_completion_metadata = response.metadata
+                agent.last_prompt_metadata.update(response.metadata)
+                agent.emit_trace(state, 'model_completed', {'completion_metadata': response.metadata, 'purpose': purpose})
+                if response.finish_reason not in {'stop', 'tool_calls'}:
+                    # Do not execute even syntactically valid calls from a truncated response.
+                    if response.tool_calls:
+                        agent.record({**response.message(), 'created_at': now()})
+                        for call in response.tool_calls:
+                            self._record_result(state, call, ToolExecutionResult(status='rejected', error_code='incomplete_model_response', message=response.finish_reason))
+                    return self._finish(state, user_message, started, response.text or f'Model stopped: {response.finish_reason}', 'model_error')
+                if response.tool_calls:
+                    ids = [call.id for call in response.tool_calls]
+                    if any(not call_id for call_id in ids) or len(set(ids)) != len(ids):
+                        raise ModelProtocolError('Missing or duplicate call ID')
+                    agent.record({**response.message(), 'created_at': now()})
+                    for call in response.tool_calls:
+                        if finalization or state.tool_steps >= agent.max_steps:
+                            result = ToolExecutionResult(status='rejected', error_code='budget_exceeded', message='Tool budget exhausted')
+                        else:
+                            state.record_tool(call.name)
+                            result = agent.execute_tool(call.name, call.arguments)
+                        self._record_result(state, call, result)
+                        agent.run_store.write_task_state(state)
+                    checkpoint = agent.create_checkpoint(state, user_message, trigger='tool_executed')
+                    agent.emit_trace(state, 'checkpoint_created', {'checkpoint_id': checkpoint['checkpoint_id'], 'trigger': 'tool_executed'})
+                    if finalization:
+                        return self._finish(state, user_message, started, 'Stopped: model called tools during finalization.', 'step_limit_reached')
+                    continue
+                if response.text.strip():
+                    return self._finish(state, user_message, started, response.text.strip())
+                agent.record({'role': 'assistant', 'content': 'Runtime notice: model returned an empty response. Return a non-empty answer or use a tool.', 'created_at': now()})
+                if finalization:
+                    break
+            return self._finish(state, user_message, started, 'Stopped after the response budget was exhausted.', 'retry_limit_reached')
+        except Exception as exc:
+            error = agent.redact_text(str(exc))
+            agent.emit_trace(state, 'model_failed', {'error': error, 'completion_metadata': dict(agent.last_completion_metadata)})
+            self._finish(state, user_message, started, f'Model request failed: {error}', 'model_error')
+            raise

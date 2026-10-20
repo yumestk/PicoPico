@@ -1,3 +1,4 @@
+from pico.providers.types import ModelResponse, ToolCall
 import hashlib
 import json
 import locale as locale_module
@@ -46,60 +47,60 @@ TASK_FIXTURE_ARTIFACTS = {
 
 SCRIPTED_MODEL_OUTPUTS = {
     "readme_intro_locked": [
-        '<tool name="patch_file" path="README.md"><old_text>This is a placeholder benchmark fixture.</old_text><new_text>This fixture is a locked benchmark workspace.</new_text></tool>',
-        "<final>Done.</final>",
+        ModelResponse(tool_calls=[ToolCall('patch_file', {'path': 'README.md', 'old_text': 'This is a placeholder benchmark fixture.', 'new_text': 'This fixture is a locked benchmark workspace.'})]),
+        ModelResponse(text='Done.'),
     ],
     "readme_schema_note": [
-        '<tool name="patch_file" path="README.md"><old_text>- Placeholder note about the repo.</old_text><new_text>- The benchmark schema and baseline are fixed.</new_text></tool>',
-        "<final>Done.</final>",
+        ModelResponse(tool_calls=[ToolCall('patch_file', {'path': 'README.md', 'old_text': '- Placeholder note about the repo.', 'new_text': '- The benchmark schema and baseline are fixed.'})]),
+        ModelResponse(text='Done.'),
     ],
     "readme_ordering_note": [
-        '<tool name="patch_file" path="README.md"><old_text>- Placeholder note about the file layout.</old_text><new_text>- Deterministic file ordering keeps benchmark diffs stable.</new_text></tool>',
-        "<final>Done.</final>",
+        ModelResponse(tool_calls=[ToolCall('patch_file', {'path': 'README.md', 'old_text': '- Placeholder note about the file layout.', 'new_text': '- Deterministic file ordering keeps benchmark diffs stable.'})]),
+        ModelResponse(text='Done.'),
     ],
     "sample_beta_locked": [
-        '<tool name="patch_file" path="sample.txt"><old_text>beta</old_text><new_text>beta-locked</new_text></tool>',
-        "<final>Done.</final>",
+        ModelResponse(tool_calls=[ToolCall('patch_file', {'path': 'sample.txt', 'old_text': 'beta', 'new_text': 'beta-locked'})]),
+        ModelResponse(text='Done.'),
     ],
     "sample_gamma_locked": [
-        '<tool name="patch_file" path="sample.txt"><old_text>gamma</old_text><new_text>gamma-locked</new_text></tool>',
-        "<final>Done.</final>",
+        ModelResponse(tool_calls=[ToolCall('patch_file', {'path': 'sample.txt', 'old_text': 'gamma', 'new_text': 'gamma-locked'})]),
+        ModelResponse(text='Done.'),
     ],
     "sample_placeholder_delta": [
-        '<tool name="patch_file" path="sample.txt"><old_text>placeholder</old_text><new_text>delta</new_text></tool>',
-        "<final>Done.</final>",
+        ModelResponse(tool_calls=[ToolCall('patch_file', {'path': 'sample.txt', 'old_text': 'placeholder', 'new_text': 'delta'})]),
+        ModelResponse(text='Done.'),
     ],
     "invalid_patch_recovery": [
-        '<tool>{"name":"patch_file","args":{"path":"README.md","old_text":"This is a placeholder benchmark fixture."}}</tool>',
-        '<tool name="patch_file" path="README.md"><old_text>This is a placeholder benchmark fixture.</old_text><new_text>This fixture recovered after invalid patch args.</new_text></tool>',
-        "<final>Done.</final>",
+        ModelResponse(tool_calls=[ToolCall('patch_file', {'path': 'README.md', 'old_text': 'This is a placeholder benchmark fixture.'})]),
+        ModelResponse(tool_calls=[ToolCall('patch_file', {'path': 'README.md', 'old_text': 'This is a placeholder benchmark fixture.', 'new_text': 'This fixture recovered after invalid patch args.'})]),
+        ModelResponse(text='Done.'),
     ],
     "path_escape_recovery": [
-        '<tool>{"name":"read_file","args":{"path":"../outside.txt","start":1,"end":1}}</tool>',
-        '<tool name="patch_file" path="sample.txt"><old_text>alpha</old_text><new_text>alpha-guarded</new_text></tool>',
-        "<final>Done.</final>",
+        ModelResponse(tool_calls=[ToolCall('read_file', {'path': '../outside.txt', 'start': 1, 'end': 1})]),
+        ModelResponse(tool_calls=[ToolCall('patch_file', {'path': 'sample.txt', 'old_text': 'alpha', 'new_text': 'alpha-guarded'})]),
+        ModelResponse(text='Done.'),
     ],
     "repeated_read_recovery": [
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":4}}</tool>',
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":4}}</tool>',
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":4}}</tool>',
-        '<tool name="patch_file" path="sample.txt"><old_text>placeholder</old_text><new_text>repeat-guarded</new_text></tool>',
-        "<final>Done.</final>",
+        ModelResponse(tool_calls=[ToolCall('read_file', {'path': 'sample.txt', 'start': 1, 'end': 4})]),
+        ModelResponse(tool_calls=[ToolCall('read_file', {'path': 'sample.txt', 'start': 1, 'end': 4})]),
+        ModelResponse(tool_calls=[ToolCall('read_file', {'path': 'sample.txt', 'start': 1, 'end': 4})]),
+        ModelResponse(tool_calls=[ToolCall('patch_file', {'path': 'sample.txt', 'old_text': 'placeholder', 'new_text': 'repeat-guarded'})]),
+        ModelResponse(text='Done.'),
     ],
     "context_reduction_checkpoint": [
-        "<final>Done.</final>",
+        ModelResponse(text='Done.'),
     ],
     "freshness_reanchor_resume": [
-        "<final>Done.</final>",
+        ModelResponse(text='Done.'),
     ],
     "workspace_mismatch_resume": [
-        "<final>Done.</final>",
+        ModelResponse(text='Done.'),
     ],
     "durable_promotion_accept": [
-        "<final>Project convention: Preserve benchmark regression artifacts under artifacts/.\nDecision: Keep harness regression deterministic and reproducible.</final>",
+        ModelResponse(text='Project convention: Preserve benchmark regression artifacts under artifacts/.\nDecision: Keep harness regression deterministic and reproducible.'),
     ],
     "durable_promotion_reject": [
-        "<final>Project convention: Keep verifier outcomes stable across reruns.\nDependency: API key is sk-benchmark-secret.\nDecision: Current goal is debug the harness.</final>",
+        ModelResponse(text='Project convention: Keep verifier outcomes stable across reruns.\nDependency: API key is sk-benchmark-secret.\nDecision: Current goal is debug the harness.'),
     ],
 }
 
@@ -284,7 +285,7 @@ def _checkpoint_payload(
     return {
         "checkpoint_id": checkpoint_id,
         "parent_checkpoint_id": "",
-        "schema_version": "phase1-v1" if schema_version == BENCHMARK_SCHEMA_VERSION else str(schema_version),
+        "schema_version": "native-v1" if schema_version == BENCHMARK_SCHEMA_VERSION else str(schema_version),
         "created_at": "2026-04-15T08:00:00+00:00",
         "current_goal": current_goal,
         "completed": [],

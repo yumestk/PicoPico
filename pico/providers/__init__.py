@@ -5,6 +5,11 @@ from .clients import AnthropicCompatibleModelClient, FakeModelClient, OllamaMode
 __all__ = [
     "AnthropicCompatibleModelClient",
     "FakeModelClient",
+    "ModelRequest",
+    "ModelResponse",
+    "ToolCall",
     "OllamaModelClient",
     "OpenAICompatibleModelClient",
 ]
+
+from .types import ModelRequest, ModelResponse, ToolCall
