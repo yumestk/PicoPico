@@ -1,34 +1,19 @@
-import json
+import pytest
 
-from pico.session_store import SessionStore
-
-
-def test_session_store_saves_loads_and_finds_latest_session(tmp_path):
-    store = SessionStore(tmp_path / ".pico" / "sessions")
-    first = {"id": "session_001", "history": [{"role": "user", "content": "first"}]}
-    second = {"id": "session_002", "history": [{"role": "user", "content": "second"}]}
-
-    first_path = store.save(first)
-    second_path = store.save(second)
-
-    assert first_path == store.path("session_001")
-    assert json.loads(first_path.read_text(encoding="utf-8"))["id"] == "session_001"
-    assert store.load("session_002") == second
-    assert store.latest() == second_path.stem
+from pico.state_store import StateStore
 
 
-def test_session_store_latest_is_none_when_empty(tmp_path):
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+def test_sessions_save_load_and_latest(tmp_path):
+    store=StateStore(tmp_path)
+    assert store.latest_session() is None
+    store.save_session({'id':'first','history':[]})
+    store.save_session({'id':'second','history':[{'role':'user','content':'hello'}]})
+    assert store.latest_session()=='second'
+    assert store.load_session('second')['history'][0]['content']=='hello'
 
-    assert store.latest() is None
 
-
-def test_session_atomic_write_preserves_previous_file_on_serialization_failure(tmp_path):
-    import pytest
-
-    store = SessionStore(tmp_path)
-    store.save({'id': 'atomic', 'history': ['original']})
-    with pytest.raises(TypeError):
-        store.save({'id': 'atomic', 'history': [object()]})
-    assert store.load('atomic')['history'] == ['original']
-    assert not list(tmp_path.glob('*.tmp'))
+def test_serialization_failure_preserves_prior_session(tmp_path):
+    store=StateStore(tmp_path)
+    store.save_session({'id':'atomic','history':['original']})
+    with pytest.raises(TypeError):store.save_session({'id':'atomic','history':[object()]})
+    assert store.load_session('atomic')['history']==['original']

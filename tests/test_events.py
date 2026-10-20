@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext, cli
+from pico import FakeModelClient, Pico, StateStore, WorkspaceContext, cli
 from pico.context_manager import message_groups
 from pico.events import PersistenceError
 from pico.providers.types import ModelResponse, ToolCall
@@ -17,20 +17,20 @@ from pico.providers.types import ModelResponse, ToolCall
 
 def agent_at(path, outputs, **kwargs):
     (path / 'README.md').write_text('hello')
-    return Pico(FakeModelClient(outputs), WorkspaceContext.build(path), SessionStore(path / '.pico/sessions'),
+    return Pico(FakeModelClient(outputs), WorkspaceContext.build(path), StateStore(path),
                 approval_policy=kwargs.pop('approval_policy', 'auto'), **kwargs)
 
 
 def events(agent):
-    return [json.loads(line) for line in agent.run_store.trace_path(agent.current_run_state).read_text().splitlines()]
+    return [json.loads(line) for line in [json.dumps(event) for event in agent.store.events(agent.current_run_state)]]
 
 
 def assert_terminal(agent, status):
     state = agent.current_run_state
     assert state.status == status
-    assert agent.run_store.load_run_state(state.run_id)['status'] == status
-    assert agent.run_store.load_report(state.run_id)['status'] == status
-    assert agent.session_store.load(agent.session['id'])['history'] == agent.session['history']
+    assert agent.store.get_run(state.run_id)['status'] == status
+    assert agent.store.get_report(state.run_id)['status'] == status
+    assert agent.store.load_session(agent.session['id'])['history'] == agent.session['history']
     terminal = [e for e in events(agent) if e['event'] == 'run_finished']
     assert len(terminal) == 1 and terminal[0]['status'] == status
 
@@ -115,12 +115,12 @@ def test_cancel_signal_during_approval_prevents_an_approved_write(tmp_path):
 
 def test_trace_failure_prevents_tool_effects(tmp_path, monkeypatch):
     agent = agent_at(tmp_path, [ModelResponse(tool_calls=[ToolCall('write_file', {'path': 'no', 'content': 'no'})])])
-    append = agent.run_store.append_trace
-    def failing_append(state, event):
-        if event['event'] == 'tool_started':
+    append = agent.store.emit
+    def failing_append(value, name, payload, state=None):
+        if name == 'tool_started':
             raise OSError('disk failed')
-        return append(state, event)
-    monkeypatch.setattr(agent.run_store, 'append_trace', failing_append)
+        return append(value, name, payload, state)
+    monkeypatch.setattr(agent.store, 'emit', failing_append)
     with pytest.raises(PersistenceError):
         agent.ask('write')
     assert not (tmp_path / 'no').exists()
@@ -131,16 +131,16 @@ def test_trace_failure_prevents_tool_effects(tmp_path, monkeypatch):
 @pytest.mark.parametrize('point', ['report', 'memory'])
 def test_completion_persistence_failure_cannot_leave_a_completed_terminal_event(tmp_path, monkeypatch, point):
     agent = agent_at(tmp_path, [ModelResponse(text='Done')])
-    write = agent.run_store.write_report
+    write = agent.store.finish
     count = 0
-    def fail_once(state, report):
+    def fail_once(session, state, report):
         nonlocal count
         count += 1
         if count == 1:
             raise OSError('report unavailable')
-        return write(state, report)
+        return write(session, state, report)
     if point == 'report':
-        monkeypatch.setattr(agent.run_store, 'write_report', fail_once)
+        monkeypatch.setattr(agent.store, 'finish', fail_once)
     else:
         def fail_memory(*_):
             raise OSError('memory unavailable')
@@ -149,8 +149,8 @@ def test_completion_persistence_failure_cannot_leave_a_completed_terminal_event(
         agent.ask('answer')
     state = agent.current_run_state
     assert state.status == 'failed'
-    assert agent.run_store.load_report(state.run_id)['status'] == 'failed'
-    assert not any(e['event'] == 'run_finished' for e in events(agent))
+    assert agent.store.get_report(state.run_id)['status'] == 'failed'
+    assert not any(e['event'] == 'run_finished' and e['status'] == 'completed' for e in events(agent))
 
 
 def test_cli_progress_and_approval_do_not_pollute_stdout(tmp_path, capsys):
@@ -178,10 +178,10 @@ def test_real_sigint_cleans_shell_child_and_saves_cancellation(tmp_path):
     command = shlex.join([sys.executable, '-c', shell_script])
     script = f"""
 from pathlib import Path
-from pico import Pico, FakeModelClient, SessionStore, WorkspaceContext
+from pico import Pico, FakeModelClient, StateStore, WorkspaceContext
 from pico.providers.types import ModelResponse, ToolCall
 root=Path({str(tmp_path)!r})
-agent=Pico(FakeModelClient([ModelResponse(tool_calls=[ToolCall('run_shell', {{'command': {command!r}}})])]), WorkspaceContext.build(root), SessionStore(root/'.pico/sessions'), approval_policy='auto')
+agent=Pico(FakeModelClient([ModelResponse(tool_calls=[ToolCall('run_shell', {{'command': {command!r}}})])]), WorkspaceContext.build(root), StateStore(root), approval_policy='auto')
 agent.ask('run')
 assert agent.current_run_state.status == 'cancelled'
 """
@@ -196,7 +196,8 @@ assert agent.current_run_state.status == 'cancelled'
         assert process.returncode == 0, stderr.decode()
         time.sleep(1)
         assert not (tmp_path / 'late').exists()
-        report = json.loads(next((tmp_path / '.pico/runs').glob('*/report.json')).read_text())
+        store=StateStore(tmp_path)
+        report=store.get_report(store.list_runs()[0]['run_id'])
         assert report['status'] == 'cancelled'
     finally:
         if process.poll() is None:

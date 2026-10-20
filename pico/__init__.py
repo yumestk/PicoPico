@@ -5,7 +5,8 @@ from .providers.clients import (
     OllamaModelClient,
     OpenAICompatibleModelClient,
 )
-from .runtime import Pico, SessionStore
+from .runtime import Pico
+from .state_store import StateStore
 from .workspace import WorkspaceContext
 
 __all__ = [
@@ -14,7 +15,7 @@ __all__ = [
     "OllamaModelClient",
     "OpenAICompatibleModelClient",
     "Pico",
-    "SessionStore",
+    "StateStore",
     "WorkspaceContext",
     "build_agent",
     "build_arg_parser",

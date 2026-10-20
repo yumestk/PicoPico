@@ -1,0 +1,356 @@
+"""Workspace state and auditable transitions in one SQLite transaction boundary."""
+
+import hashlib
+import json
+import os
+import sqlite3
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from .security import redact_artifact
+from .workspace import now
+
+TERMINAL = frozenset({'completed', 'stopped', 'failed', 'cancelled', 'interrupted'})
+SCHEMA_VERSION = 1
+
+
+class ApplicationError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def encode(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def digest(value):
+    return hashlib.sha256(encode(value).encode()).hexdigest()
+
+
+def identity(prefix):
+    return prefix + '_' + uuid.uuid4().hex
+
+
+def run_id(value):
+    return value.run_id if hasattr(value, 'run_id') else str(value)
+
+
+class StateStore:
+    managed = False
+
+    def __init__(self, workspace):
+        self.root = Path(workspace).resolve()
+        directory = self.root / '.pico'
+        directory.mkdir(parents=True, exist_ok=True)
+        self.path = directory / 'state.sqlite3'
+        self.connection = sqlite3.connect(self.path, timeout=1, isolation_level=None)
+        os.chmod(self.path, 0o600)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute('PRAGMA foreign_keys=ON')
+        self.connection.execute('PRAGMA synchronous=FULL')
+        version = self.connection.execute('PRAGMA user_version').fetchone()[0]
+        if version not in (0, SCHEMA_VERSION):
+            self.connection.close()
+            raise ApplicationError('unsupported_schema', f'Unsupported state schema: {version}')
+        if version == 0:
+            if self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchone():
+                self.connection.close()
+                raise ApplicationError('unsupported_schema', 'Unversioned database was left intact')
+            self.connection.executescript('''
+                BEGIN IMMEDIATE;
+                CREATE TABLE metadata (workspace TEXT NOT NULL);
+                CREATE TABLE sessions (id TEXT PRIMARY KEY, body TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE runs (
+                    id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+                    parent_run_id TEXT, request_id TEXT, request_hash TEXT NOT NULL,
+                    config TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL,
+                    report TEXT, instance_id TEXT, worker_pid INTEGER,
+                    created_at TEXT NOT NULL, finished_at TEXT,
+                    UNIQUE(session_id, request_id));
+                CREATE TABLE tool_calls (
+                    run_id TEXT NOT NULL REFERENCES runs(id), call_id TEXT NOT NULL,
+                    name TEXT NOT NULL, args TEXT NOT NULL, phase TEXT NOT NULL,
+                    result TEXT, PRIMARY KEY(run_id, call_id));
+                CREATE TABLE approvals (
+                    id TEXT PRIMARY KEY, run_id TEXT NOT NULL, call_id TEXT NOT NULL,
+                    body TEXT NOT NULL, status TEXT NOT NULL, decision INTEGER,
+                    FOREIGN KEY(run_id,call_id) REFERENCES tool_calls(run_id,call_id));
+                CREATE TABLE events (
+                    run_id TEXT NOT NULL REFERENCES runs(id), sequence INTEGER NOT NULL,
+                    body TEXT NOT NULL, PRIMARY KEY(run_id,sequence));
+                PRAGMA user_version=1;
+                COMMIT;
+            ''')
+            self.connection.execute('INSERT INTO metadata VALUES (?)', (str(self.root),))
+        workspace_row = self.connection.execute('SELECT workspace FROM metadata').fetchone()
+        if workspace_row is None or workspace_row[0] != str(self.root):
+            self.connection.close()
+            raise ApplicationError('workspace_mismatch', 'State database belongs to another workspace')
+
+    def close(self):
+        self.connection.close()
+
+    @contextmanager
+    def transaction(self):
+        self.connection.execute('BEGIN IMMEDIATE')
+        try:
+            yield
+            self.connection.execute('COMMIT')
+        except BaseException:
+            self.connection.execute('ROLLBACK')
+            raise
+
+    def _session(self, session):
+        self.connection.execute('INSERT INTO sessions VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at',
+                                (session['id'], encode(session), now()))
+
+    def save_session(self, session):
+        with self.transaction():
+            self._session(session)
+        return session['id']
+
+    def load_session(self, session_id):
+        row = self.connection.execute('SELECT body FROM sessions WHERE id=?', (session_id,)).fetchone()
+        if row is None:
+            raise ApplicationError('not_found', 'Session not found')
+        return json.loads(row[0])
+
+    def list_sessions(self):
+        return [json.loads(r[0]) for r in self.connection.execute('SELECT body FROM sessions ORDER BY updated_at DESC')]
+
+    def latest_session(self):
+        row = self.connection.execute('SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1').fetchone()
+        return row[0] if row else None
+
+    def reset_session(self, session_id):
+        from .features.memory import default_memory_state
+        with self.transaction():
+            if self.connection.execute("SELECT 1 FROM runs WHERE session_id=? AND status NOT IN ('completed','stopped','failed','cancelled','interrupted')", (session_id,)).fetchone():
+                raise ApplicationError('session_busy', 'Session has unfinished runs')
+            session = self.load_session(session_id)
+            session.update(history=[], memory=default_memory_state(), checkpoints={}, runtime_identity={}, resume_state={})
+            self._session(session)
+        return session
+
+    def create_run(self, session_id, prompt, config=None, request_id=None, id=None, parent_run_id='', status='queued'):
+        config = config or {}
+        request_hash = digest({'prompt': prompt, 'config': config})
+        with self.transaction():
+            self.load_session(session_id)
+            if request_id:
+                row = self.connection.execute('SELECT id,request_hash FROM runs WHERE session_id=? AND request_id=?', (session_id, request_id)).fetchone()
+                if row:
+                    if row['request_hash'] != request_hash:
+                        raise ApplicationError('request_conflict', 'Submission ID was already used with different content')
+                    return self.get_run(row['id'])
+            value = {'run_id': id or identity('run'), 'parent_run_id': parent_run_id,
+                     'session_id': session_id, 'user_request': prompt, 'status': status,
+                     'tool_steps': 0, 'attempts': 0, 'last_tool': '', 'stop_reason': '',
+                     'final_answer': '', 'checkpoint_id': '', 'resume_status': ''}
+            self.connection.execute('INSERT INTO runs(id,session_id,parent_run_id,request_id,request_hash,config,body,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)',
+                (value['run_id'], session_id, parent_run_id, request_id, request_hash, encode(config), encode(value), status, now()))
+            self._event(value['run_id'], 'run_queued' if status == 'queued' else 'run_created', {})
+        return value
+
+    def get_run(self, value):
+        row = self.connection.execute('SELECT * FROM runs WHERE id=?', (run_id(value),)).fetchone()
+        if row is None:
+            raise ApplicationError('not_found', 'Run not found')
+        return {**json.loads(row['body']), 'status': row['status'], 'session_id': row['session_id'],
+                'config': json.loads(row['config']), 'created_at': row['created_at'], 'finished_at': row['finished_at'],
+                'worker_pid': row['worker_pid'], 'instance_id': row['instance_id']}
+
+    def list_runs(self, limit=100):
+        return [self.get_run(r[0]) for r in self.connection.execute('SELECT id FROM runs ORDER BY created_at DESC LIMIT ?', (limit,))]
+
+    def set_worker(self, value, instance_id, pid):
+        with self.transaction():
+            self.connection.execute('UPDATE runs SET worker_pid=?,instance_id=? WHERE id=?', (pid, instance_id, run_id(value)))
+
+    def _update(self, state):
+        value = state.to_dict() if hasattr(state, 'to_dict') else dict(state)
+        current = self.get_run(value['run_id'])
+        if current['status'] in TERMINAL:
+            return current
+        if current['status'] == 'cancelling':
+            value['status'] = 'cancelling'
+        body = {**current, **value}
+        self.connection.execute('UPDATE runs SET body=?,status=? WHERE id=?', (encode(body), body['status'], body['run_id']))
+        return body
+
+    def update_run(self, state):
+        with self.transaction():
+            return self._update(state)
+
+    def begin_run(self, session, state, config=None):
+        value = state.to_dict() if hasattr(state, 'to_dict') else dict(state)
+        try:
+            self.get_run(value['run_id'])
+        except ApplicationError:
+            self.create_run(session['id'], value['user_request'], config, id=value['run_id'], parent_run_id=value.get('parent_run_id',''), status='running')
+        with self.transaction():
+            self._session(session)
+            return self._update({**value, 'status': 'running'})
+
+    def _event(self, value, name, payload):
+        current = self.get_run(value)
+        sequence = self.connection.execute('SELECT COALESCE(MAX(sequence),0)+1 FROM events WHERE run_id=?', (run_id(value),)).fetchone()[0]
+        event = {**redact_artifact(payload), 'event': name, 'event_id': f'{run_id(value)}:{sequence}',
+                 'sequence': sequence, 'run_id': run_id(value), 'session_id': current['session_id'], 'created_at': now()}
+        self.connection.execute('INSERT INTO events VALUES (?,?,?)', (run_id(value), sequence, encode(event)))
+        return event
+
+    def emit(self, value, name, payload, state=None):
+        with self.transaction():
+            if state is not None:
+                self._update(state)
+            return self._event(value, name, payload)
+
+    def events(self, value, after=0, limit=1000):
+        return [json.loads(r[0]) for r in self.connection.execute('SELECT body FROM events WHERE run_id=? AND sequence>? ORDER BY sequence LIMIT ?', (run_id(value), after, limit))]
+
+    def record(self, session, item, value=None, state=None, event=None):
+        with self.transaction():
+            self._session(session)
+            if value:
+                if state is not None:
+                    self._update(state)
+                if item['role'] == 'assistant':
+                    for call in item.get('tool_calls', []):
+                        self.connection.execute('INSERT INTO tool_calls VALUES (?,?,?,?,?,NULL)', (run_id(value), call['id'], call['name'], encode(call['arguments']), 'proposed'))
+                elif item['role'] == 'tool':
+                    self.connection.execute("UPDATE tool_calls SET phase='finished', result=? WHERE run_id=? AND call_id=?", (encode(item.get('result', {})), run_id(value), item['call_id']))
+                if event:
+                    return self._event(value, event['event'], event['payload'])
+        return None
+
+    def get_report(self, value):
+        row = self.connection.execute('SELECT report FROM runs WHERE id=?', (run_id(value),)).fetchone()
+        return json.loads(row[0]) if row and row[0] else None
+
+    def finish(self, session, state, report):
+        value = state.to_dict() if hasattr(state, 'to_dict') else dict(state)
+        with self.transaction():
+            current = self.get_run(value['run_id'])
+            if current['status'] in TERMINAL:
+                return current
+            if current['status'] == 'cancelling' and value['status'] != 'interrupted':
+                value.update(status='cancelled', stop_reason='cancelled', final_answer='Cancelled. Inspect interrupted operations before retrying.')
+            final = {**current, **value}
+            report = {**report, 'status': final['status'], 'stop_reason': final['stop_reason'], 'final_answer': final['final_answer'], 'run_state': final}
+            self._session(session)
+            self.connection.execute('UPDATE runs SET body=?,status=?,report=?,finished_at=? WHERE id=?',
+                                    (encode(final), final['status'], encode(report), now(), final['run_id']))
+            self.connection.execute("UPDATE approvals SET status='invalidated' WHERE run_id=? AND status IN ('pending','approved')", (final['run_id'],))
+            self.connection.execute("UPDATE tool_calls SET phase='outcome_unknown' WHERE run_id=? AND phase='executing'", (final['run_id'],))
+            if final.get('checkpoint_id'):
+                self._event(final['run_id'], 'checkpoint_created', {'checkpoint_id':final['checkpoint_id'],'trigger':final['stop_reason']})
+            self._event(final['run_id'], 'run_finished', {'status': final['status'], 'stop_reason': final['stop_reason'], 'final_answer': redact_artifact(final['final_answer'])})
+        return self.get_run(final['run_id'])
+
+    def interrupt(self, value, reason='worker_exited'):
+        current = self.get_run(value)
+        if current['status'] in TERMINAL:
+            return current
+        session = self.load_session(current['session_id'])
+        # No operation is replayed. Missing outcomes are explicitly paired for a future inspection request.
+        for row in self.connection.execute("SELECT * FROM tool_calls WHERE run_id=? AND phase!='finished'", (run_id(value),)):
+            session['history'].append({'role': 'tool', 'call_id': row['call_id'], 'name': row['name'],
+                'args': json.loads(row['args']), 'status': 'error',
+                'content': encode({'status':'outcome_unknown' if row['phase']=='executing' else 'not_executed', 'output':'Execution interrupted. Inspect the workspace; do not replay this call.'}),
+                'result': {'status':'error','error_code':'outcome_unknown','data':{},'metadata':{}}, 'created_at':now()})
+        current.update(status='interrupted', stop_reason=reason, final_answer='Execution interrupted; inspect unknown effects before submitting a new run.')
+        return self.finish(session, current, {'run_id': run_id(value)})
+
+    def cancel(self, value):
+        with self.transaction():
+            current = self.get_run(value)
+            if current['status'] in TERMINAL or current['status'] == 'cancelling':
+                return current
+            queued = current['status'] == 'queued'
+            current.update(status='cancelling', stop_reason='cancel_requested')
+            self._update(current)
+            self.connection.execute("UPDATE approvals SET status='invalidated' WHERE run_id=? AND status IN ('pending','approved')", (run_id(value),))
+            self._event(value, 'cancel_requested', {})
+        if queued:
+            current.update(status='cancelled', stop_reason='cancelled', final_answer='Cancelled before execution.')
+            return self.finish(self.load_session(current['session_id']), current, {})
+        return self.get_run(value)
+
+    def request_approval(self, value, call_id, name, args, baseline):
+        with self.transaction():
+            current = self.get_run(value)
+            if current['status'] in TERMINAL or current['status'] == 'cancelling':
+                raise ApplicationError('run_cancelled', 'Run no longer accepts approvals')
+            approval = {'id':identity('approval'),'run_id':run_id(value),'call_id':call_id,'name':name,
+                        'args':redact_artifact(args),'args_hash':digest(args),'baseline':baseline,'created_at':now(),
+                        'expires_at':(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()}
+            self.connection.execute('INSERT INTO approvals VALUES (?,?,?,?,?,NULL)', (approval['id'], run_id(value), call_id, encode(approval), 'pending'))
+            self._update({**current, 'status':'waiting_approval'})
+            self._event(value, 'approval_requested', {'approval_id':approval['id'], **approval})
+        return approval
+
+    def get_approval(self, id):
+        row = self.connection.execute('SELECT * FROM approvals WHERE id=?', (id,)).fetchone()
+        if row is None:
+            raise ApplicationError('not_found', 'Approval not found')
+        body = {**json.loads(row['body']), 'status':row['status'], 'decision':row['decision']}
+        if body['status'] in {'pending','approved'} and body['expires_at'] <= now():
+            with self.transaction():
+                self.connection.execute("UPDATE approvals SET status='expired' WHERE id=?", (id,))
+                current = self.get_run(body['run_id'])
+                if current['status'] == 'waiting_approval':
+                    self._update({**current,'status':'running'})
+                self._event(body['run_id'], 'approval_expired', {'approval_id':id,'call_id':body['call_id']})
+            body['status']='expired'
+        return body
+
+    def list_approvals(self):
+        values = [self.get_approval(r[0]) for r in self.connection.execute("SELECT id FROM approvals WHERE status='pending'").fetchall()]
+        return [v for v in values if v['status']=='pending']
+
+    def resolve_approval(self, id, approved):
+        approval = self.get_approval(id)
+        with self.transaction():
+            current = self.get_run(approval['run_id'])
+            if approval['decision'] is not None:
+                if bool(approval['decision']) != approved:
+                    raise ApplicationError('approval_conflict', 'Approval already has a different decision')
+                return approval
+            if approval['status'] != 'pending' or current['status'] != 'waiting_approval':
+                raise ApplicationError('approval_expired', 'Approval is no longer valid')
+            self.connection.execute('UPDATE approvals SET status=?,decision=? WHERE id=?', ('approved' if approved else 'denied', int(approved), id))
+            self._update({**current,'status':'running'})
+            self._event(approval['run_id'], 'approval_resolved', {'approval_id':id,'call_id':approval['call_id'],'name':approval['name'],'approved':approved})
+        return self.get_approval(id)
+
+    def permit(self, value, call_id, baseline='', approval_id=None):
+        approval = self.get_approval(approval_id) if approval_id else None
+        with self.transaction():
+            current = self.get_run(value)
+            call = self.connection.execute('SELECT * FROM tool_calls WHERE run_id=? AND call_id=?', (run_id(value), call_id)).fetchone()
+            if current['status'] != 'running' or call is None or call['phase'] != 'proposed':
+                raise ApplicationError('execution_rejected', 'Call is not eligible for execution')
+            if approval:
+                if approval['status'] != 'approved' or approval['run_id'] != run_id(value) or approval['call_id'] != call_id or approval['args_hash'] != digest(json.loads(call['args'])):
+                    raise ApplicationError('approval_expired', 'Approval does not authorize this call')
+                if approval['baseline'] != baseline:
+                    self.connection.execute("UPDATE approvals SET status='invalidated' WHERE id=?", (approval_id,))
+                    return False
+                self.connection.execute("UPDATE approvals SET status='consumed' WHERE id=?", (approval_id,))
+            self.connection.execute("UPDATE tool_calls SET phase='executing' WHERE run_id=? AND call_id=?", (run_id(value),call_id))
+            self._event(value, 'tool_authorized', {'call_id':call_id,'name':call['name']})
+        return True
+
+    def export_run(self, value):
+        root = self.root / '.pico' / 'exports' / run_id(value)
+        root.mkdir(parents=True, exist_ok=True)
+        (root/'run_state.json').write_text(encode(redact_artifact(self.get_run(value)))+'\n')
+        (root/'trace.jsonl').write_text(''.join(encode(e)+'\n' for e in self.events(value, limit=1000000)))
+        report = self.get_report(value)
+        if report is not None:
+            (root/'report.json').write_text(encode(redact_artifact(report))+'\n')
+        return root

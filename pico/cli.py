@@ -213,7 +213,7 @@ def main(argv=None):
             print(agent.memory_text())
             continue
         if user_input == "/session":
-            print(agent.session_path)
+            print(agent.session["id"], agent.store.path)
             continue
         if user_input == "/reset":
             agent.reset()

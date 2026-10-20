@@ -13,8 +13,7 @@ from pico.providers.types import ModelResponse, ToolCall
 from ..features import memory as memorylib
 from ..providers.clients import FakeModelClient
 from ..run_state import STOP_REASON_FINAL_ANSWER_RETURNED
-from ..run_store import RunStore
-from ..runtime import Pico, SessionStore
+from ..runtime import Pico, StateStore
 from ..tools import legal_tool_names
 from ..workspace import WorkspaceContext
 
@@ -354,7 +353,7 @@ def _apply_task_setup(agent, task, fixture_copy_root):
                 )
             },
         }
-        agent.session_store.save(agent.session)
+        agent.store.save_session(agent.session)
         (fixture_copy_root / path).write_text(str(setup.get("mutated_text", "alpha\nbeta\nstale-updated\nplaceholder\n")), encoding="utf-8")
         return
 
@@ -371,7 +370,7 @@ def _apply_task_setup(agent, task, fixture_copy_root):
                 )
             },
         }
-        agent.session_store.save(agent.session)
+        agent.store.save_session(agent.session)
         return
 
 
@@ -455,8 +454,7 @@ class BenchmarkEvaluator:
             fixture_copy_root,
             repo_root_override=fixture_copy_root,
         )
-        session_store = SessionStore(fixture_copy_root / ".pico" / "sessions")
-        run_store = RunStore(fixture_copy_root / ".pico" / "runs")
+        session_store = StateStore(fixture_copy_root)
         if self.model_client_factory is not None:
             model_client = self.model_client_factory(task=task, workspace=workspace)
         else:
@@ -464,8 +462,7 @@ class BenchmarkEvaluator:
         agent = Pico(
             model_client=model_client,
             workspace=workspace,
-            session_store=session_store,
-            run_store=run_store,
+            store=session_store,
             approval_policy="auto",
             max_steps=int(task["step_budget"]),
             max_new_tokens=self.max_new_tokens,
@@ -481,10 +478,13 @@ class BenchmarkEvaluator:
 
         final_answer = agent.ask(task["prompt"])
         run_state = agent.current_run_state
-        run_dir = Path(agent.current_run_dir)
-        run_state_path = agent.run_store.run_state_path(run_state)
-        report_path = agent.run_store.report_path(run_state)
-        report = agent.run_store.load_report(run_state.run_id)
+        run_dir = agent.store.export_run(run_state)
+        # The locked verifier consumes report.json under .pico/runs. Explicitly export there.
+        verifier_dir = fixture_copy_root / ".pico/runs" / run_state.run_id
+        shutil.copytree(run_dir, verifier_dir, dirs_exist_ok=True)
+        run_state_path = run_dir / "run_state.json"
+        report_path = run_dir / "report.json"
+        report = agent.store.get_report(run_state.run_id)
 
         artifact_path = _artifact_path_for_task(task)
         artifact_file = fixture_copy_root / artifact_path

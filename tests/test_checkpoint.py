@@ -1,4 +1,4 @@
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
+from pico import FakeModelClient, Pico, StateStore, WorkspaceContext
 from pico.checkpoint import (
     CHECKPOINT_FULL_VALID_STATUS,
     CHECKPOINT_NONE_STATUS,
@@ -12,11 +12,11 @@ from pico.checkpoint import (
 def build_agent(tmp_path, outputs=None, **kwargs):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     workspace = WorkspaceContext.build(tmp_path)
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = StateStore(tmp_path)
     return Pico(
         model_client=FakeModelClient(outputs or []),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy=kwargs.pop("approval_policy", "auto"),
         **kwargs,
     )

@@ -12,7 +12,7 @@ from ..providers.clients import (
     FakeModelClient,
     OpenAICompatibleModelClient,
 )
-from ..runtime import Pico, SessionStore
+from ..runtime import Pico, StateStore
 from ..workspace import WorkspaceContext
 from .evaluator import run_fixed_benchmark
 
@@ -199,11 +199,11 @@ def build_stress_agent_metrics():
         workspace_root = Path(temp_dir)
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         workspace = WorkspaceContext.build(workspace_root)
-        store = SessionStore(workspace_root / ".pico" / "sessions")
+        store = StateStore(workspace_root)
         agent = Pico(
             model_client=FakeModelClient([]),
             workspace=workspace,
-            session_store=store,
+            store=store,
             approval_policy="auto",
         )
         for index in range(12):
@@ -260,11 +260,11 @@ class _MemoryExperimentModelClient(FakeModelClient):
 
 def _build_memory_experiment_agent(workspace_root, expected_fact, filename):
     workspace = WorkspaceContext.build(workspace_root)
-    store = SessionStore(workspace_root / ".pico" / "sessions")
+    store = StateStore(workspace_root)
     return Pico(
         model_client=_MemoryExperimentModelClient(expected_fact, filename),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy="auto",
     )
 
@@ -456,11 +456,11 @@ def run_context_stress_matrix(repetitions=5):
                         workspace_root = Path(temp_dir)
                         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
                         workspace = WorkspaceContext.build(workspace_root)
-                        store = SessionStore(workspace_root / ".pico" / "sessions")
+                        store = StateStore(workspace_root)
                         agent = Pico(
                             model_client=FakeModelClient([]),
                             workspace=workspace,
-                            session_store=store,
+                            store=store,
                             approval_policy="auto",
                         )
                         for index in range(note_count):
@@ -526,11 +526,11 @@ def run_context_stress_matrix(repetitions=5):
 
 def _security_agent(workspace_root, approval_policy="auto", read_only=False):
     workspace = WorkspaceContext.build(workspace_root)
-    store = SessionStore(workspace_root / ".pico" / "sessions")
+    store = StateStore(workspace_root)
     return Pico(
         model_client=FakeModelClient([]),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy=approval_policy,
         read_only=read_only,
     )
@@ -814,8 +814,7 @@ def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_
 
 
 def _followup_trace_metrics(agent):
-    trace_path = agent.run_store.trace_path(agent.current_run_state)
-    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    events = agent.store.events(agent.current_run_state)
     repeated_reads = sum(1 for event in events if event.get("event") == "tool_executed" and event.get("name") == "read_file")
     return repeated_reads
 
@@ -841,16 +840,16 @@ def _truncate_read_history(agent):
         else:
             updated.append(item)
     agent.session["history"] = updated
-    agent.session_path = agent.session_store.save(agent.session)
+    agent.store.save_session(agent.session)
 
 
 def _build_real_agent(workspace_root, provider, approval_policy="auto", read_only=False):
     workspace = WorkspaceContext.build(workspace_root)
-    store = SessionStore(workspace_root / ".pico" / "sessions")
+    store = StateStore(workspace_root)
     return Pico(
         model_client=_make_provider_client(provider),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy=approval_policy,
         read_only=read_only,
     )
@@ -1026,7 +1025,7 @@ def _setup_real_security_workspace(workspace_root, scenario_id):
 
 
 def _last_tool_metadata(agent):
-    events = [json.loads(line) for line in agent.run_store.trace_path(agent.current_run_state).read_text().splitlines()]
+    events = [json.loads(line) for line in [json.dumps(event) for event in agent.store.events(agent.current_run_state)]]
     return next((event for event in reversed(events) if event["event"] == "tool_executed"), {})
 
 
@@ -1364,11 +1363,11 @@ RECOVERY_ABLATION_TASKS = [
 
 def _build_recovery_agent(workspace_root, required_fragments):
     workspace = WorkspaceContext.build(workspace_root)
-    store = SessionStore(workspace_root / ".pico" / "sessions")
+    store = StateStore(workspace_root)
     return Pico(
         model_client=_RecoveryScenarioModelClient(required_fragments, "recovery state restored."),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy="auto",
         max_steps=4,
     )
@@ -1406,7 +1405,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
         }
         if task["id"] == "checkpoint_resume_files":
             agent.session["checkpoints"]["items"]["ckpt_resume"]["key_files"] = [{"path": "sample.txt", "freshness": None}]
-        agent.session_store.save(agent.session)
+        agent.store.save_session(agent.session)
         return
 
     if setup in {"partial_stale_single", "partial_stale_multi"}:
@@ -1442,7 +1441,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
                 }
             },
         }
-        agent.session_store.save(agent.session)
+        agent.store.save_session(agent.session)
         (workspace_root / "sample.txt").write_text("alpha\nbeta\nstale-shifted\nplaceholder\n", encoding="utf-8")
         if setup == "partial_stale_multi":
             (workspace_root / "notes.txt").write_text("note-one\nnote-two-shifted\n", encoding="utf-8")
@@ -1469,7 +1468,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
                 }
             },
         }
-        agent.session_store.save(agent.session)
+        agent.store.save_session(agent.session)
         return
 
     if setup == "schema_mismatch":
@@ -1493,12 +1492,12 @@ def _apply_recovery_setup(agent, task, workspace_root):
                 }
             },
         }
-        agent.session_store.save(agent.session)
+        agent.store.save_session(agent.session)
         return
 
     if setup == "no_checkpoint":
         agent.session.pop("checkpoints", None)
-        agent.session_store.save(agent.session)
+        agent.store.save_session(agent.session)
         return
 
     if setup in {"partial_success_shell", "partial_success_tool"}:
@@ -1524,7 +1523,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
                 }
             },
         }
-        agent.session_store.save(agent.session)
+        agent.store.save_session(agent.session)
 
 
 def _run_recovery_task_variant(task, variant):
@@ -1535,12 +1534,12 @@ def _run_recovery_task_variant(task, variant):
         _apply_recovery_setup(agent, task, workspace_root)
         if variant == "resume_disabled":
             agent.session.pop("checkpoints", None)
-            agent.session_store.save(agent.session)
+            agent.store.save_session(agent.session)
         final_answer = agent.ask("Continue the recovery task.")
-        report = agent.run_store.load_report(agent.current_run_state.run_id)
+        report = agent.store.get_report(agent.current_run_state.run_id)
         trace = [
             json.loads(line)
-            for line in agent.run_store.trace_path(agent.current_run_state).read_text(encoding="utf-8").splitlines()
+            for line in [json.dumps(event) for event in agent.store.events(agent.current_run_state)]
         ]
         resume_status = str(report.get("prompt_metadata", {}).get("resume_status", ""))
         stale_reanchored = any(

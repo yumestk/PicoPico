@@ -142,7 +142,7 @@ def infer_next_step(run_state):
     return "Continue the task from the latest checkpoint."
 
 
-def create_checkpoint(agent, run_state, user_message, trigger):
+def create_checkpoint(agent, run_state, user_message, trigger, persist=True):
     state = checkpoint_state(agent)
     current = current_checkpoint(agent)
     checkpoint_id = "ckpt_" + uuid.uuid4().hex[:8]
@@ -171,5 +171,6 @@ def create_checkpoint(agent, run_state, user_message, trigger):
     state["current_id"] = checkpoint_id
     run_state.checkpoint_id = checkpoint_id
     agent.session["runtime_identity"] = checkpoint["runtime_identity"]
-    agent.session_path = agent.session_store.save(agent.session)
+    if persist:
+        agent.store.save_session(agent.session)
     return checkpoint

@@ -3,7 +3,7 @@ from pathlib import Path
 import pico
 from pico import (
     Pico,
-    SessionStore,
+    StateStore,
     WorkspaceContext,
     build_agent,
     build_arg_parser,
@@ -14,7 +14,7 @@ from pico import (
 
 def test_public_api_exports_current_names_only():
     assert Pico is not None
-    assert SessionStore is not None
+    assert StateStore is not None
     assert WorkspaceContext is not None
     assert callable(build_agent)
     assert callable(build_arg_parser)

@@ -8,7 +8,8 @@ from .providers.clients import (
     OllamaModelClient,
     OpenAICompatibleModelClient,
 )
-from .runtime import Pico, SessionStore
+from .runtime import Pico
+from .state_store import StateStore
 from .workspace import WorkspaceContext
 
 DEFAULT_SECRET_ENV_NAMES = (
@@ -192,16 +193,16 @@ def build_agent(args, approval_handler=None, event_handler=None):
     workspace = WorkspaceContext.build(args.cwd)
     load_project_env(workspace.repo_root)
     configured_secret_names = _configured_secret_names(args)
-    store = SessionStore(workspace.repo_root + "/.pico/sessions")
+    store = StateStore(workspace.repo_root)
     model = _build_model_client(args)
     session_id = args.resume
     if session_id == "latest":
-        session_id = store.latest()
+        session_id = store.latest_session()
     if session_id:
         return Pico.from_session(
             model_client=model,
             workspace=workspace,
-            session_store=store,
+            store=store,
             session_id=session_id,
             approval_policy=args.approval,
             max_steps=args.max_steps,
@@ -213,7 +214,7 @@ def build_agent(args, approval_handler=None, event_handler=None):
     return Pico(
         model_client=model,
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy=args.approval,
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,

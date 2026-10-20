@@ -9,6 +9,7 @@ import json
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -21,9 +22,8 @@ from .checkpoint import CHECKPOINT_NONE_STATUS
 from .context_manager import ContextManager
 from .features import memory as memorylib
 from .prompt_prefix import build_prompt_prefix, tool_signature
-from .run_store import RunStore
 from .security import REDACTED_VALUE
-from .session_store import SessionStore
+from .state_store import StateStore
 from .tool_context import ToolContext
 from .tool_executor import ToolExecutor
 from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
@@ -49,7 +49,7 @@ DURABLE_MEMORY_LINE_PATTERNS = (
 )
 SECRET_SHAPED_TEXT_PATTERN = re.compile(r"(?i)(\b(api[_ -]?key|token|secret|password)\b|sk-[A-Za-z0-9_-]{6,})")
 
-__all__ = ["Pico", "SessionStore"]
+__all__ = ["Pico", "StateStore"]
 
 
 class Pico:
@@ -57,9 +57,8 @@ class Pico:
         self,
         model_client,
         workspace,
-        session_store,
+        store,
         session=None,
-        run_store=None,
         approval_policy="ask",
         max_steps=6,
         max_new_tokens=512,
@@ -77,12 +76,12 @@ class Pico:
         self.approval_handler = approval_handler
         self.event_handler = event_handler
         self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
-        self._event_sequences = {}
         self._active_call_id = None
+        self._approval_id = None
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
-        self.session_store = session_store
+        self.store = store
         self.approval_policy = approval_policy
         if max_steps < 1 or max_new_tokens < 1:
             raise ValueError("max_steps and max_new_tokens must be positive")
@@ -97,7 +96,6 @@ class Pico:
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
         self.allowed_tools = self._normalize_allowed_tools(allowed_tools)
-        self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".pico" / "runs")
         self.session = session or {
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
             "created_at": now(),
@@ -123,9 +121,8 @@ class Pico:
         self.prefix = self.prefix_state.text
         self.context_manager = ContextManager(self)
         self.resume_state = self.evaluate_resume_state()
-        self.session_path = self.session_store.save(self.session)
         self.current_run_state = None
-        self.current_run_dir = None
+        self.store.save_session(self.session)
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
         self.last_durable_promotions = []
@@ -137,12 +134,12 @@ class Pico:
         }
 
     @classmethod
-    def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
+    def from_session(cls, model_client, workspace, store, session_id, **kwargs):
         return cls(
             model_client=model_client,
             workspace=workspace,
-            session_store=session_store,
-            session=session_store.load(session_id),
+            store=store,
+            session=store.load_session(session_id),
             **kwargs,
         )
 
@@ -286,9 +283,13 @@ class Pico:
         prompt, _ = self._build_prompt_and_metadata(user_message)
         return prompt
 
-    def record(self, item):
+    def record(self, item, event=None):
         self.session["history"].append(item)
-        self.session_path = self.session_store.save(self.session)
+        state = self.current_run_state
+        persisted = self.store.record(self.session, item, state.run_id if state else None,
+                                      state.to_dict() if state else None, event)
+        if persisted is not None:
+            events.notify(self, persisted)
 
     @staticmethod
     def looks_sensitive_env_name(name):
@@ -391,8 +392,8 @@ class Pico:
                 summaries.append(f"modified:{path}")
         return changed_paths, summaries
 
-    def create_checkpoint(self, run_state, user_message, trigger):
-        return checkpointlib.create_checkpoint(self, run_state, user_message, trigger)
+    def create_checkpoint(self, run_state, user_message, trigger, persist=True):
+        return checkpointlib.create_checkpoint(self, run_state, user_message, trigger, persist=persist)
 
     def infer_next_step(self, run_state):
         return checkpointlib.infer_next_step(run_state)
@@ -572,8 +573,7 @@ class Pico:
         child = Pico(
             model_client=self.model_client,
             workspace=self.workspace,
-            session_store=self.session_store,
-            run_store=self.run_store,
+            store=self.store,
             approval_policy="never",
             max_steps=int(args.get("max_steps", 3)),
             max_new_tokens=self.max_new_tokens,
@@ -592,20 +592,32 @@ class Pico:
         return "delegate_result:\n" + child.ask(task, parent_run_id=self.current_run_state.run_id if self.current_run_state else "")
 
     def approve(self, name, args):
+        from .state_store import digest
         state = self.current_run_state
-        payload = {"call_id": self._active_call_id, "name": name, "args": args}
         if self.cancel_event.is_set():
             raise KeyboardInterrupt
-        if self.read_only or self.approval_policy == "never":
+        if self.read_only or self.approval_policy == 'never':
             approved = False
-        elif self.approval_policy == "auto":
+        elif self.approval_policy == 'auto':
             approved = True
+        elif state is not None and self._active_call_id:
+            approval = self.store.request_approval(state.run_id, self._active_call_id, name, args,
+                                                  digest(self.capture_workspace_snapshot()))
+            self._approval_id = approval['id']
+            if self.approval_handler is not None or not self.store.managed:
+                approved = bool(self.approval_handler(name, self.redact_artifact(args))) if self.approval_handler else False
+                self.store.resolve_approval(approval['id'], approved)
+            while True:
+                if self.cancel_event.is_set():
+                    raise KeyboardInterrupt
+                result = self.store.get_approval(approval['id'])
+                if result['status'] != 'pending':
+                    return result['status'] == 'approved'
+                time.sleep(0.1)
         else:
-            if state is not None:
-                self.emit_trace(state, "approval_requested", payload)
-            approved = bool(self.approval_handler(name, self.redact_artifact(args))) if self.approval_handler is not None else False
+            approved = bool(self.approval_handler(name, self.redact_artifact(args))) if self.approval_handler else False
         if state is not None:
-            self.emit_trace(state, "approval_resolved", {**payload, "approved": approved})
+            self.emit_trace(state, 'approval_resolved', {'call_id':self._active_call_id,'name':name,'args':args,'approved':approved})
         return approved
 
     def reset(self):
@@ -613,7 +625,7 @@ class Pico:
         self.session["memory"].clear()
         self.session["memory"].update(memorylib.default_memory_state())
         self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)
-        self.session_store.save(self.session)
+        self.store.save_session(self.session)
 
     def path(self, raw_path):
         path = Path(raw_path)

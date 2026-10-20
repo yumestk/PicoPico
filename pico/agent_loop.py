@@ -22,32 +22,28 @@ class AgentLoop:
         agent = self.agent
         if reason == 'final_answer_returned':
             state.finish_success(answer)
-        elif reason in {'model_error', 'persistence_error'}:
-            state.stop(reason, status='failed', final_answer=answer)
         else:
-            state.stop(reason, status='cancelled' if reason == 'cancelled' else 'stopped', final_answer=answer)
+            state.stop(reason, status='failed' if reason in {'model_error','persistence_error'} else 'cancelled' if reason=='cancelled' else 'stopped', final_answer=answer)
         try:
             if reason == 'final_answer_returned':
                 agent.promote_durable_memory(request, answer)
-            message = response.message() if response is not None else {'role': 'assistant', 'content': answer}
-            agent.record({**message, 'created_at': now()})
-            checkpoint = agent.create_checkpoint(state, request, trigger=reason)
-            agent.run_store.write_run_state(state)
-            agent.run_store.write_report(state, agent.redact_artifact(agent.build_report(state)))
-            agent.emit_trace(state, 'checkpoint_created', {'checkpoint_id': checkpoint['checkpoint_id'], 'trigger': reason})
-            agent.emit_trace(state, 'run_finished', {'status': state.status, 'stop_reason': reason, 'final_answer': answer,
-                                                   'run_duration_ms': int((time.monotonic() - started) * 1000)})
+            message = response.message() if response is not None else {'role':'assistant','content':answer}
+            agent.session['history'].append({**message,'created_at':now()})
+            agent.create_checkpoint(state, request, trigger=reason, persist=False)
+            report = agent.redact_artifact(agent.build_report(state))
+            persisted = agent.store.finish(agent.session, state.to_dict(), report)
+            state.status, state.stop_reason, state.final_answer = persisted['status'], persisted['stop_reason'], persisted['final_answer']
+            from .events import notify
+            terminal = agent.store.events(state.run_id, limit=1000000)[-1]
+            notify(agent, terminal)
         except (OSError, ValueError, TypeError) as exc:
-            state.stop('persistence_error', status='failed', final_answer='Could not persist run completion; inspect the workspace before retrying.')
-            for save in (lambda: agent.session_store.save(agent.session),
-                         lambda: agent.run_store.write_run_state(state),
-                         lambda: agent.run_store.write_report(state, agent.redact_artifact(agent.build_report(state)))):
-                try:
-                    save()
-                except (OSError, ValueError, TypeError):
-                    pass
+            state.stop('persistence_error', status='failed', final_answer='Could not persist completion; inspect the workspace before retrying.')
+            try:
+                agent.store.finish(agent.session, state.to_dict(), agent.redact_artifact(agent.build_report(state)))
+            except (OSError, ValueError, TypeError):
+                pass
             raise PersistenceError(state.final_answer) from exc
-        return answer
+        return state.final_answer
 
     def _cancel_pending(self, state):
         history = self.agent.session['history']
@@ -68,11 +64,11 @@ class AgentLoop:
     def _record_result(self, state, call, result):
         agent = self.agent
         content = json.dumps({'status': result.status, 'output': result.content, 'error_code': result.error_code}, ensure_ascii=False)
-        agent.record({'role': 'tool', 'call_id': call.id, 'name': call.name, 'args': call.arguments,
-                      'content': content, 'status': result.status, 'result': result.to_dict(), 'created_at': now()})
-        agent.emit_trace(state, 'tool_executed', {'call_id': call.id, 'name': call.name, 'args': call.arguments,
-                                                'result': clip(result.content, 500), **result.metadata,
-                                                'tool_status': result.status, 'tool_error_code': result.error_code})
+        payload = {'call_id':call.id,'name':call.name,'args':call.arguments,'result':clip(result.content,500),
+                   **result.metadata,'tool_status':result.status,'tool_error_code':result.error_code}
+        agent.record({'role':'tool','call_id':call.id,'name':call.name,'args':call.arguments,
+                      'content':content,'status':result.status,'result':result.to_dict(),'created_at':now()},
+                     event={'event':'tool_executed','payload':agent.redact_artifact(payload)})
 
     def run(self, user_message, state):
         agent = self.agent
@@ -81,7 +77,7 @@ class AgentLoop:
         agent.current_run_state = state
         max_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
         try:
-            agent.current_run_dir = agent.run_store.start_run(state)
+            agent.store.begin_run(agent.session, state.to_dict(), {"approval":agent.approval_policy,"read_only":agent.read_only})
             agent.last_completion_metadata = {}
             agent.memory.set_task_summary(user_message)
             agent.record({'role': 'user', 'content': user_message, 'created_at': now()})
@@ -91,7 +87,7 @@ class AgentLoop:
                     raise KeyboardInterrupt
                 finalization = state.tool_steps >= agent.max_steps
                 state.record_attempt()
-                agent.run_store.write_run_state(state)
+                agent.store.update_run(state.to_dict())
                 request, metadata = agent._build_prompt_and_metadata(user_message, allow_tools=not finalization)
                 if finalization:
                     metadata['finalization'] = True
@@ -126,6 +122,7 @@ class AgentLoop:
                     agent.record({**response.message(), 'created_at': now()})
                     for call in response.tool_calls:
                         agent._active_call_id = call.id
+                        agent._approval_id = None
                         if agent.cancel_event.is_set():
                             raise KeyboardInterrupt
                         agent.emit_trace(state, 'tool_started', {'call_id': call.id, 'name': call.name, 'args': call.arguments})
@@ -135,7 +132,7 @@ class AgentLoop:
                             state.record_tool(call.name)
                             result = agent.execute_tool(call.name, call.arguments)
                         self._record_result(state, call, result)
-                        agent.run_store.write_run_state(state)
+                        agent.store.update_run(state.to_dict())
                     if agent.cancel_event.is_set():
                         raise KeyboardInterrupt
                     checkpoint = agent.create_checkpoint(state, user_message, trigger='tool_executed')

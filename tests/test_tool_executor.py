@@ -1,6 +1,6 @@
 import pytest
 
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
+from pico import FakeModelClient, Pico, StateStore, WorkspaceContext
 from pico.tool_executor import ToolExecutor
 from pico.tool_result import ToolExecutionResult
 
@@ -8,11 +8,11 @@ from pico.tool_result import ToolExecutionResult
 def build_agent(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     workspace = WorkspaceContext.build(tmp_path)
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = StateStore(tmp_path)
     return Pico(
         model_client=FakeModelClient([]),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy="auto",
     )
 

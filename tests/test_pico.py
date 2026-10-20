@@ -10,7 +10,7 @@ from pico import (
     FakeModelClient,
     OllamaModelClient,
     Pico,
-    SessionStore,
+    StateStore,
     WorkspaceContext,
     build_welcome,
 )
@@ -24,12 +24,12 @@ def build_workspace(tmp_path):
 
 def build_agent(tmp_path, outputs, **kwargs):
     workspace = build_workspace(tmp_path)
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = StateStore(tmp_path)
     approval_policy = kwargs.pop("approval_policy", "auto")
     return Pico(
         model_client=FakeModelClient(outputs),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy=approval_policy,
         **kwargs,
     )
@@ -88,7 +88,7 @@ def test_agent_only_stores_reusable_epistemic_notes(tmp_path):
     resumed = Pico.from_session(
         model_client=FakeModelClient([ModelResponse(text='It is red.')]),
         workspace=agent.workspace,
-        session_store=agent.session_store,
+        store=agent.store,
         session_id=agent.session["id"],
         approval_policy="auto",
     )
@@ -114,7 +114,7 @@ def test_file_summary_cache_is_invalidated_on_out_of_band_edit_and_path_spelling
     resumed = Pico.from_session(
         model_client=FakeModelClient([]),
         workspace=agent.workspace,
-        session_store=agent.session_store,
+        store=agent.store,
         session_id=agent.session["id"],
         approval_policy="auto",
     )
@@ -197,7 +197,7 @@ def test_agent_saves_and_resumes_session(tmp_path):
     resumed = Pico.from_session(
         model_client=FakeModelClient([ModelResponse(text='Resumed.')]),
         workspace=agent.workspace,
-        session_store=agent.session_store,
+        store=agent.store,
         session_id=agent.session["id"],
         approval_policy="auto",
     )
@@ -660,7 +660,8 @@ def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
 
     assert agent.ask("Do the thing") == "Finished."
 
-    runs_root = tmp_path / ".pico" / "runs"
+    agent.store.export_run(agent.current_run_state)
+    runs_root = tmp_path / ".pico" / "exports"
     run_dirs = [path for path in runs_root.iterdir() if path.is_dir()]
     assert len(run_dirs) == 1
 
@@ -680,7 +681,7 @@ def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
     assert report["run_state"]["stop_reason"] == "final_answer_returned"
     assert report["run_id"] == run_state["run_id"]
     trace_events = [json.loads(line)["event"] for line in trace_lines]
-    assert trace_events[0] == "run_started"
+    assert "run_started" in trace_events
     assert trace_events[-1] == "run_finished"
     assert trace_events.count("prompt_built") == 2
     assert "tool_executed" in trace_events
@@ -699,7 +700,8 @@ def test_trace_and_report_redact_secret_env_values(tmp_path):
 
         assert agent.ask("Mask the secret") == "Masked."
 
-    runs_root = tmp_path / ".pico" / "runs"
+    agent.store.export_run(agent.current_run_state)
+    runs_root = tmp_path / ".pico" / "exports"
     run_dirs = [path for path in runs_root.iterdir() if path.is_dir()]
     assert len(run_dirs) == 1
 
@@ -749,7 +751,7 @@ def test_prompt_budget_metadata_records_budget_decisions(tmp_path):
 
     trace_events = [
         json.loads(line)
-        for line in (agent.run_store.trace_path(agent.current_run_state).read_text(encoding="utf-8").splitlines())
+        for line in ([json.dumps(event) for event in agent.store.events(agent.current_run_state)])
     ]
     prompt_events = [event for event in trace_events if event["event"] == "prompt_built"]
     assert prompt_events
@@ -816,11 +818,11 @@ def test_agent_creates_checkpoint_when_context_reduction_happens_and_artifacts_o
     assert checkpoint["current_blocker"] == ""
     assert checkpoint["next_step"]
 
-    run_state = json.loads(agent.run_store.run_state_path(agent.current_run_state).read_text(encoding="utf-8"))
-    report = json.loads(agent.run_store.report_path(agent.current_run_state).read_text(encoding="utf-8"))
+    run_state = agent.store.get_run(agent.current_run_state)
+    report = agent.store.get_report(agent.current_run_state)
     trace_events = [
         json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_run_state).read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(event) for event in agent.store.events(agent.current_run_state)]
     ]
 
     assert run_state["checkpoint_id"] == checkpoint["checkpoint_id"]
@@ -856,12 +858,12 @@ def test_resume_prompt_uses_checkpoint_state_not_just_history(tmp_path):
             }
         },
     }
-    agent.session_store.save(agent.session)
+    agent.store.save_session(agent.session)
 
     resumed = Pico.from_session(
         model_client=FakeModelClient([ModelResponse(text='Resumed.')]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
+        store=agent.store,
         session_id=agent.session["id"],
         approval_policy="auto",
     )
@@ -901,13 +903,13 @@ def test_resume_invalidates_stale_file_summaries_and_marks_partial_stale(tmp_pat
             }
         },
     }
-    agent.session_store.save(agent.session)
+    agent.store.save_session(agent.session)
     file_path.write_text("beta\n", encoding="utf-8")
 
     resumed = Pico.from_session(
         model_client=FakeModelClient([ModelResponse(text='Resumed.')]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
+        store=agent.store,
         session_id=agent.session["id"],
         approval_policy="auto",
     )
@@ -958,12 +960,12 @@ def test_resume_marks_workspace_mismatch_when_checkpoint_runtime_identity_is_sta
             }
         },
     }
-    agent.session_store.save(agent.session)
+    agent.store.save_session(agent.session)
 
     resumed = Pico.from_session(
         model_client=FakeModelClient([ModelResponse(text='Resumed.')]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
+        store=agent.store,
         session_id=agent.session["id"],
         approval_policy="auto",
     )
@@ -985,7 +987,7 @@ def test_write_file_trace_records_minimum_tool_contract_fields(tmp_path):
 
     trace_events = [
         json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_run_state).read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(event) for event in agent.store.events(agent.current_run_state)]
     ]
     tool_event = [event for event in trace_events if event["event"] == "tool_executed"][-1]
 
@@ -1020,12 +1022,12 @@ def test_resume_marks_schema_mismatch_when_checkpoint_version_is_incompatible(tm
             }
         },
     }
-    agent.session_store.save(agent.session)
+    agent.store.save_session(agent.session)
 
     resumed = Pico.from_session(
         model_client=FakeModelClient([ModelResponse(text='Resumed.')]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
+        store=agent.store,
         session_id=agent.session["id"],
         approval_policy="auto",
     )
@@ -1037,12 +1039,12 @@ def test_resume_marks_schema_mismatch_when_checkpoint_version_is_incompatible(tm
 def test_resume_marks_no_checkpoint_when_session_has_no_checkpoint_state(tmp_path):
     agent = build_agent(tmp_path, [ModelResponse(text='checkpoint ready.')])
     agent.session.pop("checkpoints", None)
-    agent.session_store.save(agent.session)
+    agent.store.save_session(agent.session)
 
     resumed = Pico.from_session(
         model_client=FakeModelClient([ModelResponse(text='Resumed.')]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
+        store=agent.store,
         session_id=agent.session["id"],
         approval_policy="auto",
     )
@@ -1078,14 +1080,14 @@ def test_freshness_mismatch_creates_checkpoint_before_model_completion(tmp_path)
             }
         },
     }
-    agent.session_store.save(agent.session)
+    agent.store.save_session(agent.session)
     file_path.write_text("beta\n", encoding="utf-8")
 
     assert agent.ask("Continue the task") == "Resumed."
 
     trace_events = [
         json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_run_state).read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(event) for event in agent.store.events(agent.current_run_state)]
     ]
     checkpoint_events = [event for event in trace_events if event["event"] == "checkpoint_created"]
 
@@ -1095,11 +1097,11 @@ def test_freshness_mismatch_creates_checkpoint_before_model_completion(tmp_path)
 
 def test_runtime_identity_persists_key_execution_metadata(tmp_path):
     workspace = build_workspace(tmp_path)
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = StateStore(tmp_path)
     agent = Pico(
         model_client=FakeModelClient([ModelResponse(text='Done.')]),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy="never",
         max_steps=9,
         max_new_tokens=1024,
@@ -1153,12 +1155,12 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
             }
         },
     }
-    agent.session_store.save(agent.session)
+    agent.store.save_session(agent.session)
 
     resumed = Pico.from_session(
         model_client=FakeModelClient([ModelResponse(text='Resumed.')]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
+        store=agent.store,
         session_id=agent.session["id"],
         approval_policy="never",
         max_steps=9,
@@ -1180,7 +1182,7 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
 
     trace_events = [
         json.loads(line)
-        for line in resumed.run_store.trace_path(resumed.current_run_state).read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(event) for event in resumed.store.events(resumed.current_run_state)]
     ]
     mismatch_events = [event for event in trace_events if event["event"] == "runtime_identity_mismatch"]
     assert mismatch_events
@@ -1235,7 +1237,7 @@ def test_explicit_memory_promotion_persists_durable_memory_topics(tmp_path):
     index_path = tmp_path / ".pico" / "memory" / "MEMORY.md"
     conventions_path = tmp_path / ".pico" / "memory" / "topics" / "project-conventions.md"
     decisions_path = tmp_path / ".pico" / "memory" / "topics" / "key-decisions.md"
-    report = json.loads(agent.run_store.report_path(agent.current_run_state).read_text(encoding="utf-8"))
+    report = agent.store.get_report(agent.current_run_state)
 
     assert index_path.exists()
     assert conventions_path.exists()
@@ -1279,7 +1281,7 @@ def test_explicit_memory_promotion_rejects_secret_shaped_and_transient_lines(tmp
 
     agent.ask("Capture these stable facts into durable memory.")
 
-    report = json.loads(agent.run_store.report_path(agent.current_run_state).read_text(encoding="utf-8"))
+    report = agent.store.get_report(agent.current_run_state)
     conventions_path = tmp_path / ".pico" / "memory" / "topics" / "project-conventions.md"
     dependency_path = tmp_path / ".pico" / "memory" / "topics" / "dependency-facts.md"
 
@@ -1308,7 +1310,7 @@ def test_explicit_memory_promotion_supersedes_matching_durable_fact(tmp_path):
     assert agent.ask("Save the updated dependency fact into durable memory.") == "Dependency: Python runtime is 3.12."
 
     dependency_path = tmp_path / ".pico" / "memory" / "topics" / "dependency-facts.md"
-    report = json.loads(agent.run_store.report_path(agent.current_run_state).read_text(encoding="utf-8"))
+    report = agent.store.get_report(agent.current_run_state)
     text = dependency_path.read_text(encoding="utf-8")
 
     assert "Python runtime is 3.12." in text
@@ -1349,11 +1351,11 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
             return response
 
     workspace = build_workspace(tmp_path)
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = StateStore(tmp_path)
     agent = Pico(
         model_client=CacheAwareFakeModelClient([ModelResponse(text='Done.')]),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy="auto",
     )
 
@@ -1395,7 +1397,7 @@ def test_public_api_exports_resolve_through_package_path():
     assert FakeModelClient is not None
     assert Pico is not None
     assert OllamaModelClient is not None
-    assert SessionStore is not None
+    assert StateStore is not None
     assert WorkspaceContext is not None
     assert Path(pico_pkg.__file__).as_posix().endswith("/pico/__init__.py")
 

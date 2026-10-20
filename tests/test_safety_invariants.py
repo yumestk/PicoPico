@@ -4,7 +4,7 @@ import subprocess
 import sys
 from unittest.mock import patch
 
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
+from pico import FakeModelClient, Pico, StateStore, WorkspaceContext
 from pico import cli as pico_cli
 from pico.providers.types import ModelResponse, ToolCall
 from pico.run_state import RunState
@@ -17,12 +17,12 @@ def build_workspace(tmp_path):
 
 def build_agent(tmp_path, outputs, **kwargs):
     workspace = build_workspace(tmp_path)
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = StateStore(tmp_path)
     approval_policy = kwargs.pop("approval_policy", "auto")
     return Pico(
         model_client=FakeModelClient(outputs),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy=approval_policy,
         **kwargs,
     )
@@ -42,7 +42,7 @@ def test_prefix_refresh_preserves_the_declared_workspace_root(tmp_path):
     root = tmp_path / 'nested'
     root.mkdir()
     workspace = WorkspaceContext.build(root, repo_root_override=root)
-    agent = Pico(FakeModelClient([]), workspace, SessionStore(root / '.pico/sessions'))
+    agent = Pico(FakeModelClient([]), workspace, StateStore(root))
     agent.refresh_prefix(force=True)
     assert agent.root == root
     assert agent.workspace.repo_root == str(root)
@@ -218,7 +218,7 @@ def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):
             secret_env_names=("GITHUB_PAT", "GH_PAT"),
         )
         state = RunState.create(run_id="run_001", user_request="Mask configured secrets")
-        agent.run_store.start_run(state)
+        agent.store.begin_run(agent.session, state)
 
         assert set(agent.secret_env_summary()["secret_env_names"]) == {"GITHUB_PAT", "GH_PAT"}
 
@@ -229,12 +229,13 @@ def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):
             "list": [github_pat, gh_pat],
         }
         agent.emit_trace(state, "tool_executed", payload)
-        agent.run_store.write_report(
-            state,
+        state.finish_success("done")
+        agent.store.finish(
+            agent.session, state,
             agent.redact_artifact({"run_state": state.to_dict(), "payload": payload}),
         )
 
-    run_dir = agent.run_store.run_dir(state.run_id)
+    run_dir = agent.store.export_run(state.run_id)
     trace_text = (run_dir / "trace.jsonl").read_text(encoding="utf-8")
     report_text = (run_dir / "report.json").read_text(encoding="utf-8")
 

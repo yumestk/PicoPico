@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
+from pico import FakeModelClient, Pico, StateStore, WorkspaceContext
 from pico.context_manager import ContextBudgetError, ContextManager, message_groups
 from pico.providers.types import ModelProtocolError, ModelResponse, ToolCall
 
@@ -10,7 +10,7 @@ from pico.providers.types import ModelProtocolError, ModelResponse, ToolCall
 def build_agent(tmp_path, outputs, **kwargs):
     (tmp_path / "README.md").write_text("demo\n")
     return Pico(model_client=FakeModelClient(outputs), workspace=WorkspaceContext.build(tmp_path),
-                session_store=SessionStore(tmp_path / ".pico/sessions"), approval_policy="auto", **kwargs)
+                store=StateStore(tmp_path), approval_policy="auto", **kwargs)
 
 
 def tool_round(size=100):

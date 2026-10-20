@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
+from pico import FakeModelClient, Pico, StateStore, WorkspaceContext
 from pico.agent_loop import AgentLoop
 from pico.providers.types import ModelResponse, ToolCall
 from pico.run_state import RunState
@@ -11,11 +11,11 @@ from pico.run_state import RunState
 def build_agent(tmp_path, outputs, **kwargs):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     workspace = WorkspaceContext.build(tmp_path)
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = StateStore(tmp_path)
     return Pico(
         model_client=FakeModelClient(outputs),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy="auto",
         **kwargs,
     )
@@ -35,7 +35,7 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
 
     assert answer == "Done."
     assert agent.current_run_state.status == "completed"
-    assert agent.run_store.report_path(agent.current_run_state.run_id).exists()
+    assert bool(agent.store.get_report(agent.current_run_state.run_id))
 
 
 def test_pico_ask_delegates_to_agent_loop(tmp_path):
@@ -62,8 +62,7 @@ def test_agent_loop_reserves_a_final_answer_after_tool_budget_is_exhausted(tmp_p
     assert agent.current_run_state.status == "completed"
     assert agent.current_run_state.tool_steps == 6
     assert agent.current_run_state.attempts == 7
-    trace_path = agent.run_store.trace_path(agent.current_run_state)
-    trace_events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    trace_events = agent.store.events(agent.current_run_state)
     assert any(
         event["event"] == "model_requested" and event.get("purpose") == "finalization"
         for event in trace_events
@@ -91,9 +90,9 @@ def test_agent_loop_persists_model_failure_before_reraising(tmp_path):
     assert state.status == "failed"
     assert state.stop_reason == "model_error"
     assert state.attempts == 1
-    assert agent.run_store.run_state_path(state).exists()
-    assert agent.run_store.report_path(state).exists()
-    report = agent.run_store.load_report(state.run_id)
+    assert bool(agent.store.get_run(state))
+    assert bool(agent.store.get_report(state))
+    report = agent.store.get_report(state.run_id)
     assert report["stop_reason"] == "model_error"
     assert "ended before a text block" in report["final_answer"]
 
@@ -146,8 +145,8 @@ def test_old_session_and_changed_protocol_are_explicit_errors(tmp_path):
     session = dict(agent.session)
     session.pop('format')
     with pytest.raises(ValueError, match='Unsupported session format'):
-        Pico(agent.model_client, agent.workspace, agent.session_store, session=session)
+        Pico(agent.model_client, agent.workspace, agent.store, session=session)
     session['format'] = 'native-v1'
     session['provider_protocol'] = 'another-protocol'
     with pytest.raises(ValueError, match='protocol changed'):
-        Pico(agent.model_client, agent.workspace, agent.session_store, session=session)
+        Pico(agent.model_client, agent.workspace, agent.store, session=session)

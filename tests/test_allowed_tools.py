@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
+from pico import FakeModelClient, Pico, StateStore, WorkspaceContext
 from pico.evaluation.evaluator import BenchmarkEvaluator, validate_benchmark
 from pico.providers.types import ModelResponse
 
@@ -10,11 +10,11 @@ from pico.providers.types import ModelResponse
 def build_agent(tmp_path, allowed_tools=None):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     workspace = WorkspaceContext.build(tmp_path)
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = StateStore(tmp_path)
     return Pico(
         model_client=FakeModelClient([ModelResponse(text='Done.')]),
         workspace=workspace,
-        session_store=store,
+        store=store,
         approval_policy="auto",
         allowed_tools=allowed_tools,
     )

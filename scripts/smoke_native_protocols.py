@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pico import Pico, SessionStore, WorkspaceContext
+from pico import Pico, StateStore, WorkspaceContext
 from pico.application import _build_model_client
 from pico.cli import build_arg_parser
 from pico.config import load_project_env
@@ -36,7 +36,7 @@ def run_case(client, parent, name):
         approval = 'never' if name == 'denial' else 'ask'
     def interrupt(*_):
         raise KeyboardInterrupt
-    agent = Pico(client, WorkspaceContext.build(root, repo_root_override=root), SessionStore(root / '.pico/sessions'),
+    agent = Pico(client, WorkspaceContext.build(root, repo_root_override=root), StateStore(root),
                  max_steps=8, max_new_tokens=1024, allowed_tools=allowed, approval_policy=approval,
                  approval_handler=interrupt if name == 'cancellation' else None)
     row = {'scenario': name, 'workspace': str(root), 'status': 'failed'}
@@ -44,7 +44,7 @@ def run_case(client, parent, name):
         answer = agent.ask(prompt)
         results = [m for m in agent.session['history'] if m['role'] == 'tool']
         row.update(run_status=agent.current_run_state.status, tool_steps=agent.current_run_state.tool_steps,
-                   final_answer=answer, run_dir=str(agent.current_run_dir))
+                   final_answer=answer, run_dir=str(agent.store.export_run(agent.current_run_state)))
         if name == 'workflow':
             reads = [m for m in results if m['name'] == 'read_file' and m['result']['status'] == 'ok']
             patches = [m for m in results if m['name'] == 'patch_file' and m['result']['status'] == 'ok']
