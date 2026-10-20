@@ -14,12 +14,16 @@ class AgentLoop:
     def __init__(self, agent):
         self.agent = agent
         self._finished = False
+        self._seen_call_ids = set()
 
     def _finish(self, state, request, started, answer, reason='final_answer_returned', response=None):
         if self._finished:
             return state.final_answer
         self._finished = True
         agent = self.agent
+        if reason == 'final_answer_returned' and agent.cancel_event.is_set():
+            reason='cancelled'
+            answer='Cancelled before finalization.'
         if reason == 'final_answer_returned':
             state.finish_success(answer)
         else:
@@ -31,6 +35,7 @@ class AgentLoop:
             agent.session['history'].append({**message,'created_at':now()})
             agent.create_checkpoint(state, request, trigger=reason, persist=False)
             report = agent.redact_artifact(agent.build_report(state))
+            report['run_duration_ms'] = int((time.monotonic() - started) * 1000)
             persisted = agent.store.finish(agent.session, state.to_dict(), report)
             state.status, state.stop_reason, state.final_answer = persisted['status'], persisted['stop_reason'], persisted['final_answer']
             from .events import notify
@@ -44,22 +49,6 @@ class AgentLoop:
                 pass
             raise PersistenceError(state.final_answer) from exc
         return state.final_answer
-
-    def _cancel_pending(self, state):
-        history = self.agent.session['history']
-        for index in reversed(range(len(history))):
-            message = history[index]
-            if message['role'] == 'assistant' and message.get('tool_calls'):
-                done = {m.get('call_id') for m in history[index + 1:] if m['role'] == 'tool'}
-                from .providers.types import ToolCall
-                for item in message['tool_calls']:
-                    if item['id'] not in done:
-                        result = ToolExecutionResult(status='cancelled', error_code='tool_cancelled',
-                            message='Run cancelled; interrupted execution outcome must be inspected before retrying.')
-                        self._record_result(state, ToolCall(**item), result)
-                return
-            if message['role'] == 'user':
-                return
 
     def _record_result(self, state, call, result):
         agent = self.agent
@@ -117,8 +106,9 @@ class AgentLoop:
                     return self._finish(state, user_message, started, response.text or f'Model stopped: {response.finish_reason}', 'model_error')
                 if response.tool_calls:
                     ids = [call.id for call in response.tool_calls]
-                    if any(not call_id for call_id in ids) or len(set(ids)) != len(ids):
+                    if any(not call_id for call_id in ids) or len(set(ids)) != len(ids) or self._seen_call_ids.intersection(ids):
                         raise ModelProtocolError('Missing or duplicate call ID')
+                    self._seen_call_ids.update(ids)
                     agent.record({**response.message(), 'created_at': now()})
                     for call in response.tool_calls:
                         agent._active_call_id = call.id
@@ -150,10 +140,6 @@ class AgentLoop:
             agent.cancel_event.set()
             if self._finished:
                 return state.final_answer
-            try:
-                self._cancel_pending(state)
-            except OSError:
-                return self._finish(state, user_message, started, 'Could not persist cancellation.', 'persistence_error')
             return self._finish(state, user_message, started, 'Cancelled. Inspect any interrupted tool before retrying.', 'cancelled')
         except Exception as exc:
             if self._finished:

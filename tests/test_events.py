@@ -213,3 +213,45 @@ assert agent.current_run_state.status == 'cancelled'
         if process.poll() is None:
             process.kill()
             process.communicate()
+
+
+def test_patch_changed_during_approval_returns_a_paired_stale_result(tmp_path):
+    (tmp_path/'sample').write_text('before')
+    agent=agent_at(tmp_path,[ModelResponse(tool_calls=[ToolCall('patch_file',{'path':'sample','old_text':'before','new_text':'after'})]),ModelResponse(text='No patch')],approval_policy='ask')
+    def approve(*_):
+        (tmp_path/'sample').write_text('external')
+        return True
+    agent.approval_handler=approve
+    assert agent.ask('patch')=='No patch'
+    assert (tmp_path/'sample').read_text()=='external'
+    assert next(m for m in agent.session['history'] if m['role']=='tool')['result']['error_code']=='approval_stale'
+    assert message_groups(agent.session['history'])
+
+
+@pytest.mark.parametrize('point',['assistant_ack','result_ack','before_commit'])
+def test_record_ack_loss_keeps_committed_facts_and_complete_groups(tmp_path,monkeypatch,point):
+    agent=agent_at(tmp_path,[ModelResponse(tool_calls=[ToolCall('write_file',{'path':'effect','content':'written'},'call')]),ModelResponse(text='Done')])
+    record=agent.store.record
+    fired=False
+    def interrupted_record(session,item,*args,**kwargs):
+        nonlocal fired
+        relevant=item['role']=='tool' if point=='result_ack' else item['role']=='assistant' and bool(item.get('tool_calls'))
+        if relevant and not fired:
+            fired=True
+            if point=='before_commit':raise OSError('intent not committed')
+            record(session,item,*args,**kwargs)
+            raise KeyboardInterrupt
+        return record(session,item,*args,**kwargs)
+    monkeypatch.setattr(agent.store,'record',interrupted_record)
+    if point=='before_commit':
+        with pytest.raises(OSError):agent.ask('write')
+    else:
+        agent.ask('write')
+    stored=agent.store.load_session(agent.session['id'])
+    assert message_groups(stored['history'])
+    assert stored['history']==agent.session['history']
+    assert (tmp_path/'effect').exists()==(point=='result_ack')
+    if point=='result_ack':
+        assert next(m for m in stored['history'] if m['role']=='tool')['status']=='ok'
+    if point=='assistant_ack':
+        assert next(m for m in stored['history'] if m['role']=='tool')['result']['error_code']=='not_executed'

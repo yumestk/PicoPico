@@ -46,7 +46,8 @@ class StateStore:
         self.root = Path(workspace).resolve()
         self.secret_env_names = set()
         directory = self.root / ".pico"
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(directory, 0o700)
         self.path = directory / "state.sqlite3"
         self.connection = sqlite3.connect(self.path, timeout=1, isolation_level=None)
         os.chmod(self.path, 0o600)
@@ -103,6 +104,12 @@ class StateStore:
             raise ApplicationError(
                 "workspace_mismatch", "State database belongs to another workspace"
             )
+
+    def configured_secret_names(self):
+        names = set()
+        for row in self.connection.execute("SELECT config FROM runs"):
+            names.update(json.loads(row[0]).get("secret_env_names", []))
+        return names
 
     def redact(self, value):
         return redact_artifact(value, secret_env_names=self.secret_env_names)
@@ -383,12 +390,96 @@ class StateStore:
         ).fetchone()
         return json.loads(row[0]) if row and row[0] else None
 
+    def _pair_unfinished(self, session, value):
+        pending = {
+            row["call_id"]: dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM tool_calls WHERE run_id=? AND phase!='finished'",
+                (run_id(value),),
+            )
+        }
+        if not pending:
+            return []
+        history = session["history"]
+        start = max(
+            (i for i, m in enumerate(history) if m["role"] == "user"), default=0
+        )
+        rebuilt = history[:start]
+        index = start
+        unknown = []
+        while index < len(history):
+            message = history[index]
+            rebuilt.append(message)
+            index += 1
+            if message["role"] != "assistant" or not message.get("tool_calls"):
+                continue
+            existing = {}
+            while index < len(history) and history[index]["role"] == "tool":
+                existing[history[index]["call_id"]] = history[index]
+                index += 1
+            for call in message["tool_calls"]:
+                if call["id"] in existing:
+                    rebuilt.append(existing[call["id"]])
+                    continue
+                row = pending.get(call["id"])
+                if row is None:
+                    continue
+                phase = (
+                    "outcome_unknown"
+                    if row["phase"] in {"executing", "outcome_unknown"}
+                    else "not_executed"
+                )
+                result = {
+                    "status": "error",
+                    "error_code": phase,
+                    "data": {},
+                    "message": "Execution interrupted. Inspect the workspace before retrying.",
+                    "metadata": {"outcome_unknown": phase == "outcome_unknown"},
+                }
+                rebuilt.append(
+                    {
+                        "role": "tool",
+                        "call_id": call["id"],
+                        "name": row["name"],
+                        "args": json.loads(row["args"]),
+                        "status": "error",
+                        "content": encode(
+                            {
+                                "status": phase,
+                                "output": result["message"],
+                                "error_code": phase,
+                            }
+                        ),
+                        "result": result,
+                        "created_at": now(),
+                    }
+                )
+                self.connection.execute(
+                    "UPDATE tool_calls SET phase=?,result=? WHERE run_id=? AND call_id=?",
+                    (phase, encode(result), run_id(value), call["id"]),
+                )
+                if phase == "outcome_unknown":
+                    unknown.append(call["id"])
+        session["history"][:] = rebuilt
+        return unknown
+
     def finish(self, session, state, report):
         value = state.to_dict() if hasattr(state, "to_dict") else dict(state)
+        working_session = {**session, "history": list(session["history"])}
         with self.transaction():
             current = self.get_run(value["run_id"])
             if current["status"] in TERMINAL:
                 return current
+            committed_history = self.load_session(session["id"])["history"]
+            final_message = session["history"][-1] if session["history"] else None
+            working_session["history"] = list(committed_history)
+            if (
+                isinstance(final_message, dict)
+                and final_message.get("role") == "assistant"
+                and not final_message.get("tool_calls")
+                and (not committed_history or committed_history[-1] != final_message)
+            ):
+                working_session["history"].append(final_message)
             if current["status"] == "cancelling" and value["status"] != "interrupted":
                 value.update(
                     status="cancelled",
@@ -396,14 +487,17 @@ class StateStore:
                     final_answer="Cancelled. Inspect interrupted operations before retrying.",
                 )
             final = {**current, **value}
+            final.pop("last_sequence", None)
+            unknown = self._pair_unfinished(working_session, final["run_id"])
             report = {
+                "unknown_calls": unknown,
                 **report,
                 "status": final["status"],
                 "stop_reason": final["stop_reason"],
                 "final_answer": final["final_answer"],
                 "run_state": final,
             }
-            self._session(session)
+            self._session(working_session)
             self.connection.execute(
                 "UPDATE runs SET body=?,status=?,report=?,finished_at=? WHERE id=?",
                 (
@@ -438,8 +532,10 @@ class StateStore:
                     "status": final["status"],
                     "stop_reason": final["stop_reason"],
                     "final_answer": self.redact(final["final_answer"]),
+                    "run_duration_ms": report.get("run_duration_ms"),
                 },
             )
+        session["history"][:] = working_session["history"]
         return self.get_run(final["run_id"])
 
     def interrupt(self, value, reason="worker_exited"):
@@ -447,35 +543,6 @@ class StateStore:
         if current["status"] in TERMINAL:
             return current
         session = self.load_session(current["session_id"])
-        # No operation is replayed. Missing outcomes are explicitly paired for a future inspection request.
-        for row in self.connection.execute(
-            "SELECT * FROM tool_calls WHERE run_id=? AND phase!='finished'",
-            (run_id(value),),
-        ):
-            session["history"].append(
-                {
-                    "role": "tool",
-                    "call_id": row["call_id"],
-                    "name": row["name"],
-                    "args": json.loads(row["args"]),
-                    "status": "error",
-                    "content": encode(
-                        {
-                            "status": "outcome_unknown"
-                            if row["phase"] == "executing"
-                            else "not_executed",
-                            "output": "Execution interrupted. Inspect the workspace; do not replay this call.",
-                        }
-                    ),
-                    "result": {
-                        "status": "error",
-                        "error_code": "outcome_unknown",
-                        "data": {},
-                        "metadata": {},
-                    },
-                    "created_at": now(),
-                }
-            )
         current.update(
             status="interrupted",
             stop_reason=reason,
@@ -673,4 +740,18 @@ class StateStore:
         report = self.get_report(value)
         if report is not None:
             (root / "report.json").write_text(encode(self.redact(report)) + "\n")
+        calls = [
+            {
+                "call_id": r["call_id"],
+                "name": r["name"],
+                "args": json.loads(r["args"]),
+                "phase": r["phase"],
+                "result": json.loads(r["result"]) if r["result"] else None,
+            }
+            for r in self.connection.execute(
+                "SELECT * FROM tool_calls WHERE run_id=? ORDER BY rowid",
+                (run_id(value),),
+            )
+        ]
+        (root / "tool_results.json").write_text(encode(self.redact(calls)) + "\n")
         return root

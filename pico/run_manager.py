@@ -50,6 +50,7 @@ class RunManager:
         self.blocked = False
         self.scripts = {}
         self.cancel_tasks = set()
+        self._cancelled_process = None
 
     async def recover(self):
         deadline = asyncio.get_running_loop().time() + 5
@@ -123,11 +124,16 @@ class RunManager:
         self.process = process
         errors = asyncio.create_task(self._read_stderr(process, config))
         try:
+            if self.store.get_run(run["run_id"])["status"] in TERMINAL:
+                process.terminate()
+                return
             self.store.set_worker(run["run_id"], self.instance_id, process.pid)
             process.stdin.write(
                 json.dumps(bootstrap, ensure_ascii=False).encode() + b"\n"
             )
             await process.stdin.drain()
+            if self.store.get_run(run["run_id"])["status"] == "cancelling":
+                self._signal_cancel(process)
             while line := await process.stdout.readline():
                 request = json.loads(line)
                 response = {"id": request["id"]}
@@ -227,6 +233,8 @@ class RunManager:
         run = self.store.get_run(value)
         if run.get("parent_run_id"):
             value = run["parent_run_id"]
+        if self.store.get_run(value)["status"] in TERMINAL | {"cancelling"}:
+            return self.store.get_run(value)
         result = self.store.cancel(value)
         for child in self.store.list_runs(limit=1000000):
             if child.get("parent_run_id") == value and child["status"] not in TERMINAL:
@@ -236,11 +244,17 @@ class RunManager:
             and self.process is not None
             and self.process.returncode is None
         ):
-            self.process.stdin.write(b'{"cancel":true}\n')
-            task = asyncio.create_task(self._cancel_deadline(self.process))
-            self.cancel_tasks.add(task)
-            task.add_done_callback(self.cancel_tasks.discard)
+            self._signal_cancel(self.process)
         return result
+
+    def _signal_cancel(self, process):
+        if self._cancelled_process is process:
+            return
+        self._cancelled_process = process
+        process.stdin.write(b'{"cancel":true}\n')
+        task = asyncio.create_task(self._cancel_deadline(process))
+        self.cancel_tasks.add(task)
+        task.add_done_callback(self.cancel_tasks.discard)
 
     async def _cancel_deadline(self, process):
         try:

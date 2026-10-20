@@ -287,10 +287,11 @@ class Pico:
         return prompt
 
     def record(self, item, event=None):
-        self.session["history"].append(item)
+        proposed = {**self.session, 'history': [*self.session['history'], item]}
         state = self.current_run_state
-        persisted = self.store.record(self.session, item, state.run_id if state else None,
+        persisted = self.store.record(proposed, item, state.run_id if state else None,
                                       state.to_dict() if state else None, event)
+        self.session['history'].append(item)
         if persisted is not None:
             events.notify(self, persisted)
 

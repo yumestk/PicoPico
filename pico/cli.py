@@ -101,12 +101,26 @@ def console_approve(name, args):
     return input().strip().lower() in {"y", "yes"}
 
 
-def add_options(parser, suppress=False):
+class RuntimeOption(argparse.Action):
+    def __call__(self, parser, namespace, value, option_string=None):
+        if self.dest == "secret_env_names":
+            value = [*getattr(namespace, self.dest, []), value]
+        setattr(namespace, self.dest, value)
+        namespace.explicit_config = {
+            **getattr(namespace, "explicit_config", {}),
+            self.dest: value,
+        }
+
+
+def add_options(parser):
     def option(name, **kwargs):
         key = name.replace("-", "_")
         default = DEFAULT_OPTIONS.get(key)
         parser.add_argument(
-            "--" + name, default=argparse.SUPPRESS if suppress else default, **kwargs
+            "--" + name,
+            action=RuntimeOption,
+            default=default,
+            **kwargs,
         )
 
     option("provider", choices=PROVIDER_CHOICES)
@@ -120,13 +134,13 @@ def add_options(parser, suppress=False):
     parser.add_argument(
         "--secret-env-name",
         dest="secret_env_names",
-        action="append",
-        default=argparse.SUPPRESS if suppress else [],
+        action=RuntimeOption,
+        default=[],
     )
-    parser.add_argument("--cwd", default=argparse.SUPPRESS if suppress else ".")
+    parser.add_argument("--cwd", default=".")
     parser.add_argument(
         "--session",
-        default=argparse.SUPPRESS if suppress else None,
+        default=None,
         help="Database session ID, or latest.",
     )
 
@@ -138,15 +152,13 @@ def build_arg_parser():
     add_options(parser)
     commands = parser.add_subparsers(dest="command")
     run = commands.add_parser("run", help="Submit a task and attach to its progress.")
-    add_options(run, True)
     run.add_argument("prompt", nargs="+")
     run.add_argument(
         "--detach",
         action="store_true",
         help="Print run ID and leave execution with the Host.",
     )
-    chat = commands.add_parser("chat", help="Interactive session (default command).")
-    add_options(chat, True)
+    commands.add_parser("chat", help="Interactive session (default command).")
     host = commands.add_parser("host")
     host.add_argument("action", choices=["start", "status", "stop"])
     host.add_argument("--cwd", default=argparse.SUPPRESS)
@@ -162,7 +174,6 @@ def build_arg_parser():
     sessions = commands.add_parser("sessions")
     sessions.add_argument("action", choices=["list", "get", "create", "reset"])
     sessions.add_argument("session_id", nargs="?")
-    add_options(sessions, True)
     return parser
 
 
@@ -266,7 +277,7 @@ def main(argv=None):
                 )
             print(json.dumps(result, ensure_ascii=False))
             return 0
-        config = {key: getattr(args, key) for key in DEFAULT_OPTIONS}
+        config = getattr(args, "explicit_config", {})
         if args.command == "sessions":
             if args.action == "list":
                 result = client.call("sessions.list")
@@ -312,6 +323,7 @@ def main(argv=None):
                     "session_id": session["id"],
                     "prompt": prompt,
                     "client_request_id": identity("submit"),
+                    "config": config,
                 },
             )
 

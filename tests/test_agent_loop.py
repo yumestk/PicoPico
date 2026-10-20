@@ -149,3 +149,16 @@ def test_old_session_and_changed_protocol_are_explicit_errors(tmp_path):
     session['provider_protocol'] = 'another-protocol'
     with pytest.raises(ValueError, match='protocol changed'):
         Pico(agent.model_client, agent.workspace, agent.store, session=session)
+
+
+def test_reused_call_id_in_later_round_is_a_protocol_error_not_a_second_effect(tmp_path):
+    from pico.providers.types import ModelProtocolError
+    agent=build_agent(tmp_path,[ModelResponse(tool_calls=[ToolCall('write_file',{'path':'first','content':'one'},'same')]),
+                                 ModelResponse(tool_calls=[ToolCall('write_file',{'path':'second','content':'two'},'same')])])
+    with pytest.raises(ModelProtocolError,match='duplicate'):
+        agent.ask('write files')
+    assert (tmp_path/'first').read_text()=='one'
+    assert not (tmp_path/'second').exists()
+    assert agent.current_run_state.stop_reason=='model_error'
+    from pico.context_manager import message_groups
+    assert message_groups(agent.store.load_session(agent.session['id'])['history'])

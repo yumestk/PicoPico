@@ -1,6 +1,7 @@
 """Small synchronous client shared by CLI clients; each call owns its connection."""
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -13,6 +14,10 @@ from .state_store import ApplicationError, identity
 
 class HostClient:
     def __init__(self, root):
+        if os.name != "posix":
+            raise ApplicationError(
+                "unsupported_platform", "The workspace Host currently requires POSIX"
+            )
         self.root = Path(root).resolve()
         self.path = socket_path(self.root)
 

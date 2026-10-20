@@ -164,7 +164,8 @@ def test_host_is_singleton(tmp_path):
             [sys.executable, "-m", "pico.host", "--workspace", str(tmp_path)],
             env=env,
             capture_output=True,
-            timeout=5,check=False,
+            timeout=5,
+            check=False,
         )
         assert second.returncode == 1
         assert client.call("host.info")["status"] == "ready"
@@ -252,6 +253,191 @@ def test_sigkill_host_interrupts_old_run_and_invalidates_approval(tmp_path):
                     {"approval_id": approval["id"], "approved": True},
                 )
             assert not (tmp_path / "no").exists()
+        finally:
+            restarted.terminate()
+            restarted.wait(timeout=10)
+            restarted.stderr.close()
+
+
+def test_two_cli_processes_submit_and_approve_then_attach(tmp_path):
+    script = [
+        ModelResponse(
+            tool_calls=[
+                ToolCall("write_file", {"path": "from-cli", "content": "hello"})
+            ]
+        ),
+        ModelResponse(text="Done"),
+    ]
+    with running_host(tmp_path, script) as (client, _, env):
+        submitted = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pico",
+                "--cwd",
+                str(tmp_path),
+                "--approval",
+                "ask",
+                "run",
+                "write file",
+                "--detach",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert submitted.returncode == 0, submitted.stderr
+        value = submitted.stdout.strip()
+        assert value.startswith("run_")
+        approval = wait(lambda: client.call("approvals.list"))[0]
+        approved = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pico",
+                "--cwd",
+                str(tmp_path),
+                "approvals",
+                "approve",
+                approval["id"],
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert approved.returncode == 0, approved.stderr
+        attached = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pico",
+                "--cwd",
+                str(tmp_path),
+                "runs",
+                "attach",
+                value,
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert attached.returncode == 0, attached.stderr
+        assert attached.stdout == "Done\n"
+        assert "Using write_file" in attached.stderr
+        assert (tmp_path / "from-cli").read_text() == "hello"
+        session_id = client.call("runs.get", {"run_id": value})["session_id"]
+        continued = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pico",
+                "--cwd",
+                str(tmp_path),
+                "--session",
+                session_id,
+                "--max-steps",
+                "1",
+                "--approval",
+                "never",
+                "run",
+                "continue",
+                "--detach",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert continued.returncode == 0, continued.stderr
+        resumed = client.call("runs.get", {"run_id": continued.stdout.strip()})
+        assert resumed["config"]["max_steps"] == 1
+        assert resumed["config"]["approval"] == "never"
+
+
+def test_host_sigkill_stops_shell_and_restart_never_replays_it(tmp_path):
+    import shlex
+
+    command = shlex.join(
+        [
+            sys.executable,
+            "-c",
+            "import time;open('ready','w').write('ready');time.sleep(1);open('late','w').write('late')",
+        ]
+    )
+    script = [
+        ModelResponse(tool_calls=[ToolCall("run_shell", {"command": command})]),
+        ModelResponse(text="Done"),
+    ]
+    with running_host(tmp_path, script) as (client, process, env):
+        _, run = submit(client)
+        wait(lambda: (tmp_path / "ready").exists())
+        process.kill()
+        process.wait(timeout=5)
+        restarted = subprocess.Popen(
+            [sys.executable, "-m", "pico.host", "--workspace", str(tmp_path)],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        try:
+
+            def ready():
+                try:
+                    return client.call("host.info")
+                except (OSError, ApplicationError):
+                    return False
+
+            wait(ready)
+            result = terminal(client, run["run_id"])
+            assert result["status"] == "interrupted"
+            assert result["report"]["unknown_calls"]
+            time.sleep(1.1)
+            assert not (tmp_path / "late").exists()
+        finally:
+            restarted.terminate()
+            restarted.wait(timeout=10)
+            restarted.stderr.close()
+
+
+def test_completed_transaction_survives_host_restart(tmp_path):
+    script = [
+        ModelResponse(
+            tool_calls=[ToolCall("write_file", {"path": "once", "content": "once"})]
+        ),
+        ModelResponse(text="Done"),
+    ]
+    with running_host(tmp_path, script) as (client, process, env):
+        _, run = submit(client)
+        wait(lambda: terminal(client, run["run_id"]))
+        process.kill()
+        process.wait(timeout=5)
+        restarted = subprocess.Popen(
+            [sys.executable, "-m", "pico.host", "--workspace", str(tmp_path)],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        try:
+
+            def ready():
+                try:
+                    return client.call("host.info")
+                except (OSError, ApplicationError):
+                    return False
+
+            wait(ready)
+            assert terminal(client, run["run_id"])["status"] == "completed"
+            events = client.call("runs.events", {"run_id": run["run_id"]})["events"]
+            assert len([e for e in events if e["event"] == "run_finished"]) == 1
+            assert len([e for e in events if e["event"] == "tool_authorized"]) == 1
+            assert len(client.call("runs.list")) == 1
         finally:
             restarted.terminate()
             restarted.wait(timeout=10)

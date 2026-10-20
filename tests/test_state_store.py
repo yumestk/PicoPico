@@ -149,3 +149,50 @@ def test_unknown_schema_and_legacy_json_left_intact(tmp_path):
         StateStore(tmp_path)
     assert before == (tmp_path / ".pico/state.sqlite3").read_bytes()
     assert legacy.read_text() == '{"id":"old"}'
+
+
+def test_pending_approval_expires_and_cannot_be_consumed(tmp_path):
+    store = StateStore(tmp_path)
+    session, state = setup(store)
+    tool(store, session, state)
+    approval = store.request_approval(
+        state["run_id"],
+        "call",
+        "write_file",
+        {"path": "x", "content": "hello"},
+        "before",
+    )
+    body = {**approval, "expires_at": "2000-01-01T00:00:00+00:00"}
+    store.connection.execute(
+        "UPDATE approvals SET body=? WHERE id=?", (json.dumps(body), approval["id"])
+    )
+    assert store.get_approval(approval["id"])["status"] == "expired"
+    with pytest.raises(ApplicationError):
+        store.resolve_approval(approval["id"], True)
+    with pytest.raises(ApplicationError):
+        store.permit(state["run_id"], "call", "before", approval["id"])
+
+
+def test_ask_policy_cannot_bypass_the_approval_gate(tmp_path):
+    store = StateStore(tmp_path)
+    session, state = setup(store)
+    tool(store, session, state)
+    store.connection.execute(
+        "UPDATE runs SET config=? WHERE id=?",
+        (json.dumps({"approval": "ask"}), state["run_id"]),
+    )
+    with pytest.raises(ApplicationError, match="Policy"):
+        store.permit(state["run_id"], "call")
+
+
+def test_failed_run_pairs_unknown_calls_before_final_assistant(tmp_path):
+    from pico.context_manager import message_groups
+
+    store = StateStore(tmp_path)
+    session, state = setup(store)
+    tool(store, session, state)
+    assert store.permit(state["run_id"], "call")
+    session["history"].append({"role": "assistant", "content": "Runtime failed"})
+    store.finish(session, {**state, "status": "failed", "final_answer": "failed"}, {})
+    assert message_groups(store.load_session("s")["history"])
+    assert store.get_report(state["run_id"])["unknown_calls"] == ["call"]

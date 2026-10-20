@@ -1,6 +1,7 @@
 """Application assembly: one place resolves workspace, model and execution policy."""
 
 import asyncio
+import json
 import os
 from dataclasses import asdict
 from types import SimpleNamespace
@@ -351,6 +352,7 @@ class ApplicationService:
         return agent.ask(prompt, run_id=RunState.create(user_request=prompt).run_id)
 
     async def open(self):
+        self.secret_env_names.update(self.store.configured_secret_names())
         await self.manager.recover()
         return self
 
@@ -368,8 +370,8 @@ class ApplicationService:
             "host.info": ({}, {}),
             "host.stop": ({}, {}),
             "sessions.create": ({}, {"config": dict}),
-            "sessions.list": ({}, {}),
-            "sessions.get": ({"session_id": str}, {}),
+            "sessions.list": ({}, {"limit": int}),
+            "sessions.get": ({"session_id": str}, {"after_message": int, "limit": int}),
             "sessions.reset": ({"session_id": str}, {}),
             "runs.start": (
                 {"session_id": str, "prompt": str, "client_request_id": str},
@@ -401,24 +403,50 @@ class ApplicationService:
             if type(value) is not expected or (expected is str and not value.strip()):
                 raise ApplicationError("invalid_request", f"Invalid {key}")
         for name, low, high in [
-            ("limit", 1, 500),
+            ("limit", 0 if method == "sessions.get" else 1, 500),
+            ("after_message", 0, 2**63 - 1),
             ("after_sequence", 0, 2**63 - 1),
             ("wait_ms", 0, 20000),
         ]:
             if name in params and not low <= params[name] <= high:
                 raise ApplicationError("invalid_request", f"Invalid {name}")
 
-        def public_session(session):
+        def conversation(session_id):
+            session = self.store.load_session(session_id)
+            if "config" not in session:
+                raise ApplicationError(
+                    "unsupported_session",
+                    "Internal delegate sessions are read-only; inspect their run instead",
+                )
+            return session
+
+        def public_session(session, after=0, limit=0):
+            # Raw replay blocks and old checkpoint snapshots stay private; history is paged for display.
             value = {
-                **session,
-                "history": [
-                    {k: v for k, v in item.items() if k != "provider_blocks"}
-                    for item in session["history"]
-                ],
+                key: session[key]
+                for key in [
+                    "id",
+                    "format",
+                    "created_at",
+                    "provider_protocol",
+                    "workspace_root",
+                    "config",
+                    "memory",
+                ]
+                if key in session
             }
+            value.update(
+                history=[
+                    {k: v for k, v in item.items() if k != "provider_blocks"}
+                    for item in session["history"][after : after + limit]
+                ],
+                next_message=min(after + limit, len(session["history"])),
+                history_count=len(session["history"]),
+            )
             return redact_artifact(value, secret_env_names=self.secret_env_names)
 
         if method == "host.info":
+            self.manager.pump()
             return {
                 "protocol": "pico-host-v1",
                 "instance_id": self.manager.instance_id,
@@ -457,18 +485,36 @@ class ApplicationService:
                     "created_at": s["created_at"],
                     "provider_protocol": s["provider_protocol"],
                 }
-                for s in self.store.list_sessions()
+                for s in self.store.list_sessions(params.get("limit", 100))
+                if "config" in s
             ]
         if method == "sessions.get":
-            return public_session(self.store.load_session(params["session_id"]))
+            return public_session(
+                conversation(params["session_id"]),
+                params.get("after_message", 0),
+                params.get("limit", 0),
+            )
         if method == "sessions.reset":
+            conversation(params["session_id"])
             return public_session(self.store.reset_session(params["session_id"]))
         if method == "runs.start":
+            self.manager.pump()
             if not self.manager.accepting or self.manager.blocked:
                 raise ApplicationError(
                     "workspace_blocked", "Workspace is not accepting new execution"
                 )
-            session = self.store.load_session(params["session_id"])
+            session = conversation(params["session_id"])
+            from .worker import MAX_MESSAGE
+
+            # ponytail: whole-session IPC is capped at 16 MiB; page kernel history if that ceiling becomes practical.
+            if (
+                len(json.dumps(session, ensure_ascii=False).encode())
+                > MAX_MESSAGE - 65536
+            ):
+                raise ApplicationError(
+                    "session_too_large",
+                    "Start a new session; original history remains intact",
+                )
             config, protocol = freeze_options(
                 self.store.root,
                 {**session.get("config", {}), **params.get("config", {})},

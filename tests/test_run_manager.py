@@ -226,8 +226,98 @@ def test_read_only_delegate_runs_in_parent_slot_and_has_distinct_identity(tmp_pa
             assert len(children) == 1
             assert children[0]["status"] == "completed"
             assert children[0]["run_id"] != run["run_id"]
+            public_sessions = await app.dispatch("sessions.list")
+            assert children[0]["session_id"] not in {s["id"] for s in public_sessions}
+            with pytest.raises(ApplicationError, match="Internal delegate"):
+                await app.dispatch(
+                    "runs.start",
+                    {
+                        "session_id": children[0]["session_id"],
+                        "prompt": "cannot promote",
+                        "client_request_id": "new-root",
+                    },
+                )
+
             assert app.store.get_run(run["run_id"])["status"] == "completed"
         finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_workspace_execution_lease_blocks_new_runs_until_released(tmp_path):
+    import fcntl
+
+    async def scenario():
+        app = await ApplicationService(
+            tmp_path, test_script=[ModelResponse(text="Done")]
+        ).open()
+        try:
+            session = await app.dispatch("sessions.create")
+            with (tmp_path / ".pico/execution.lock").open("a+") as lease:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with pytest.raises(ApplicationError, match="not accepting"):
+                    await app.dispatch(
+                        "runs.start",
+                        {
+                            "session_id": session["id"],
+                            "prompt": "blocked",
+                            "client_request_id": "blocked",
+                        },
+                    )
+                assert not app.store.list_runs()
+            run = await app.dispatch(
+                "runs.start",
+                {
+                    "session_id": session["id"],
+                    "prompt": "ready",
+                    "client_request_id": "ready",
+                },
+            )
+            await wait_for(
+                lambda: app.store.get_run(run["run_id"])["status"] in TERMINAL
+            )
+            assert app.store.get_run(run["run_id"])["status"] == "completed"
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_cancel_during_worker_spawn_never_starts_execution(tmp_path, monkeypatch):
+    async def scenario():
+        app = await ApplicationService(
+            tmp_path,
+            test_script=[
+                ModelResponse(
+                    tool_calls=[ToolCall("write_file", {"path": "no", "content": "no"})]
+                )
+            ],
+        ).open()
+        real_spawn = asyncio.create_subprocess_exec
+        spawned = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_spawn(*args, **kwargs):
+            process = await real_spawn(*args, **kwargs)
+            spawned.set()
+            await release.wait()
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+        try:
+            _, run = await start(app)
+            await asyncio.wait_for(spawned.wait(), 3)
+            app.manager.cancel(run["run_id"])
+            release.set()
+            await wait_for(lambda: app.manager.active is None)
+            assert app.store.get_run(run["run_id"])["status"] == "cancelled"
+            assert not (tmp_path / "no").exists()
+            assert not any(
+                e["event"] == "model_requested" for e in app.store.events(run["run_id"])
+            )
+        finally:
+            release.set()
             await app.close()
 
     asyncio.run(scenario())

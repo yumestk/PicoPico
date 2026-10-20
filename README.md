@@ -16,8 +16,9 @@
 - 包名是 `pico`
 - CLI 命令是 `pico`
 - 模块入口是 `python -m pico`
-- 会话保存在 `.pico/sessions/`
-- 每次运行的工件保存在 `.pico/runs/<run_id>/`
+- 会话、运行、审批和事件保存在 `.pico/state.sqlite3`
+- 每个工作区由独立 Host 管理后台任务，支持断线重连和跨终端审批
+- 审计工件通过 `pico runs export <run_id>` 显式导出到 `.pico/exports/<run_id>/`
 - 模型通过原生工具调用执行任务，支持一轮多个调用，按顺序校验、审批和执行
 - 进度、工具状态与审批显示在 stderr，最终回答输出到 stdout；Ctrl+C 取消运行并保存现场
 - 支持四类模型后端：
@@ -73,7 +74,7 @@ uv run pico --cwd /path/to/repo
 直接跑一次性任务：
 
 ```bash
-uv run pico "inspect the test failures and propose a fix"
+uv run pico run "inspect the test failures and propose a fix"
 ```
 
 如果当前环境已经安装过包，也可以直接这样启动：
@@ -139,15 +140,35 @@ DeepSeek 当前走 Anthropic-compatible Messages API，所以 runtime 里复用�
 
 Pico 使用原生工具协议，并完整保存回放所需的 provider 响应块。DeepSeek 当前仍显式关闭 thinking，沿用有界的单步输出预算；这不影响原生工具调用。
 
-### 第一阶段的执行行为
+### 后台任务、重连与取消
 
-会话格式为 `native-v1`，记录 provider 协议身份。旧文本协议会话和不同协议的会话不能直接恢复，请新建会话；旧文件不会自动迁移或覆盖。上下文预算以字符计数，工具 schema 也计入预算；裁剪保留完整工具调用与结果，无法容纳必要消息时明确停止。
+`pico` 默认进入交互会话，`pico run "任务"` 提交一次任务并显示进度。首次使用时自动启动当前工作区的本地 Host；同一工作区的任务串行执行。
 
-shell 命令分别保留最多 64 KiB 的 stdout 和 stderr，同时持续排空管道；模型可见文本另有展示长度限制。超时或取消会清理 POSIX 进程组，当前验收平台为 macOS/POSIX。Windows 的进程树管理留待后续实现。
+```bash
+uv run pico run "检查测试失败" --detach
+uv run pico runs list
+uv run pico runs attach <run_id>
+uv run pico approvals list
+uv run pico approvals approve <approval_id>
+uv run pico approvals deny <approval_id>
+uv run pico runs cancel <run_id>
+uv run pico host status
+uv run pico host stop
+```
 
-运行中的工具失败、审批拒绝会作为结果交给模型继续判断；取消结束整次运行。`completed` 表示模型正常结束本次执行，独立的任务正确性仍由测试或 verifier 判断。
+运行选项放在子命令之前，例如 `pico --session latest --max-steps 10 run "继续修复"`；显式选项覆盖会话默认配置。`--detach` 输出 run_id 后退出，任务继续执行。终端关闭或连接断开也不会取消任务；在 attach 时按 Ctrl+C 会向 Host 提交取消。进度和审批显示在 stderr，最终回答输出到 stdout。新 attach 默认回放已有事件，`--after <sequence>` 可以从指定游标继续。
 
-开发者可向 `Pico` 注入 `approval_handler(name, args)`、`event_handler(event)` 和共享的 `threading.Event` 取消信号。事件先脱敏并写入 trace，再交给展示回调；展示异常不改变执行事实，持久化失败会阻止后续工具执行。第一阶段计划与验收记录仅保存在本地 `docs/`，不纳入 GitHub 仓库。
+ask 模式下的审批保存在数据库中，有效期为 30 分钟，可以从另一个终端回复。批准只对对应调用生效；审批期间工作区变化会使批准失效。等待审批会占用当前工作区执行槽，用户可以拒绝或取消来继续处理后续任务。
+
+旧 `.pico/sessions/*.json` 不自动导入，也不再作为恢复入口；请创建新的数据库会话。使用 `--session <session_id>` 或 `--session latest` 继续当前原生协议的会话，切换 provider 协议需要新会话。
+
+Host 异常退出后，原来未结束的运行标记为 interrupted，不自动重放工具。执行结果未知时需要先检查文件；未确认命令已结束的工作区会阻止新执行。`completed` 表示执行正常结束，任务正确性仍由测试或 verifier 判断。
+
+当前验收平台为 macOS/POSIX。每个根 Run 使用独立 worker，命令监督进程在 worker 退出后清理 shell 进程组；两路输出各保留最多 64 KiB，默认命令超时 20 秒，最大 120 秒。模型可见工具文本另有 4000 字符展示限制。
+
+开发者入口为 `ApplicationService` 和 `HostClient`，执行内核继续使用 `ModelRequest`、`ModelResponse`、`ToolExecutionResult`。模型所需原始回放块保存在私有会话中，展示事件先脱敏再公开。逐 Token 流式输出、Windows 进程管理和桌面 UI 留待后续阶段。
+
+阶段计划和验收记录仅保存在本地 `docs/`，不纳入 GitHub 仓库。
 
 ### 可选配置：right.codes
 
@@ -247,8 +268,8 @@ uv run pico --provider ollama --model qwen3.5:4b
 
 - `/help`：查看内置命令
 - `/memory`：查看提炼后的工作记忆
-- `/session`：查看当前会话文件路径
-- `/reset`：清空当前会话状态
+- `/session`：查看当前数据库会话 ID
+- `/reset`：清空当前会话状态（有未结束任务时拒绝）
 - `/exit` 或 `/quit`：退出 REPL
 
 ## 安全与持久化
@@ -259,20 +280,22 @@ uv run pico --provider ollama --model qwen3.5:4b
 - `--approval auto`
 - `--approval never`
 
-每次运行结束后，都会在 `.pico/runs/<run_id>/` 下写出这些文件：
+运行状态、会话、工具结果、报告和事件以 SQLite 为唯一来源。完成状态与结束事件在同一事务提交；旧 JSON 文件不参与恢复。数据库和运行目录保存在本地，默认不上传仓库。
 
-- `task_state.json`
-- `trace.jsonl`
-- `report.json`
+```bash
+uv run pico runs export <run_id>
+```
 
-这些内容默认只保存在本地，不需要跟仓库一起提交。
+显式导出生成 `run_state.json`、`trace.jsonl`、完整的 `tool_results.json` 和已有的 `report.json`。导出失败会单独报告，不改变数据库中的执行结果。
+
+Host 通过当前用户私有的 Unix socket 通信，不监听网络端口。凭据由环境或项目 `.env` 提供，不写入公共 RPC、运行配置快照或进程参数。Host 日志按大小轮转，worker 诊断有界保留。进程组管理不构成对同一用户恶意进程的沙箱。
 
 ## 开发
 
 常用本地检查：
 
 ```bash
-uv run pytest tests -q
+uv run python -m pytest tests -q
 uv run ruff check pico tests scripts
 ```
 

@@ -109,13 +109,16 @@ class ToolExecutor:
         if agent.current_run_state is not None and agent._active_call_id:
             from .state_store import ApplicationError, digest
             try:
-                agent.validate_tool(name, args)
                 permitted = agent.store.permit(agent.current_run_state.run_id, agent._active_call_id,
                                                digest(before_snapshot), agent._approval_id)
             except ApplicationError as exc:
                 return ToolExecutionResult(status='rejected', error_code=exc.code, message=str(exc))
             if not permitted:
                 return ToolExecutionResult(status='rejected', error_code='approval_stale', message='Workspace changed while waiting for approval')
+            try:
+                agent.validate_tool(name,args)
+            except (ValueError,TypeError) as exc:
+                return ToolExecutionResult(status='rejected',error_code='invalid_arguments',message=str(exc))
         try:
             data = tool["run"](args)
             after_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else before_snapshot
