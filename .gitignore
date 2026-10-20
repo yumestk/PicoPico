@@ -54,3 +54,6 @@ docs/*
 # Packaging metadata
 pico.egg-info/
 test.md
+
+# Local project documentation
+docs/

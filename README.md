@@ -147,7 +147,7 @@ shell 命令分别保留最多 64 KiB 的 stdout 和 stderr，同时持续排空
 
 运行中的工具失败、审批拒绝会作为结果交给模型继续判断；取消结束整次运行。`completed` 表示模型正常结束本次执行，独立的任务正确性仍由测试或 verifier 判断。
 
-开发者可向 `Pico` 注入 `approval_handler(name, args)`、`event_handler(event)` 和共享的 `threading.Event` 取消信号。事件先脱敏并写入 trace，再交给展示回调；展示异常不改变执行事实，持久化失败会阻止后续工具执行。接口及验收结果见 [第一阶段验收记录](docs/phase1-verification.md)，执行计划见 [PHASE1_PLAN.md](docs/PHASE1_PLAN.md)。
+开发者可向 `Pico` 注入 `approval_handler(name, args)`、`event_handler(event)` 和共享的 `threading.Event` 取消信号。事件先脱敏并写入 trace，再交给展示回调；展示异常不改变执行事实，持久化失败会阻止后续工具执行。第一阶段计划与验收记录仅保存在本地 `docs/`，不纳入 GitHub 仓库。
 
 ### 可选配置：right.codes
 
