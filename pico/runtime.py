@@ -9,9 +9,11 @@ import hashlib
 import os
 import re
 import uuid
+import threading
 from datetime import datetime
 from pathlib import Path
 
+from . import events
 from . import checkpoint as checkpointlib
 from .features import memory as memorylib
 from . import security as securitylib
@@ -68,12 +70,22 @@ class Pico:
         secret_env_names=None,
         feature_flags=None,
         allowed_tools=None,
+        approval_handler=None,
+        event_handler=None,
+        cancel_event=None,
     ):
+        self.approval_handler = approval_handler
+        self.event_handler = event_handler
+        self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
+        self._event_sequences = {}
+        self._active_call_id = None
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
         self.session_store = session_store
         self.approval_policy = approval_policy
+        if max_steps < 1 or max_new_tokens < 1:
+            raise ValueError("max_steps and max_new_tokens must be positive")
         self.max_steps = max_steps
         self.max_new_tokens = max_new_tokens
         self.depth = depth
@@ -343,12 +355,7 @@ class Pico:
         return prompt, metadata
 
     def emit_trace(self, task_state, event, payload=None):
-        payload = self.redact_artifact(payload or {})
-        payload["event"] = event
-        payload["created_at"] = now()
-        # trace 是运行中的逐事件时间线，适合回答“这一轮 agent 到底做了什么”。
-        self.run_store.append_trace(task_state, payload)
-        return payload
+        return events.emit(self, task_state, event, payload)
 
     def capture_workspace_snapshot(self):
         snapshot = {}
@@ -507,6 +514,8 @@ class Pico:
     def ask(self, user_message):
         from .agent_loop import AgentLoop
 
+        if self.depth == 0 and self.current_task_state is not None:
+            self.cancel_event.clear()
         return AgentLoop(self).run(user_message)
 
     def execute_tool(self, name, args):
@@ -562,6 +571,7 @@ class Pico:
             depth=self.depth,
             max_depth=self.max_depth,
             spawn_delegate=self.spawn_delegate,
+            cancel_event=self.cancel_event,
         )
 
     def spawn_delegate(self, args):
@@ -577,6 +587,8 @@ class Pico:
             depth=self.depth + 1,
             max_depth=self.max_depth,
             read_only=True,
+            event_handler=self.event_handler,
+            cancel_event=self.cancel_event,
             secret_env_names=self.secret_env_names,
             shell_env_allowlist=self.shell_env_allowlist,
         )
@@ -587,17 +599,21 @@ class Pico:
         return "delegate_result:\n" + child.ask(task)
 
     def approve(self, name, args):
-        if self.read_only:
-            return False
-        if self.approval_policy == "auto":
-            return True
-        if self.approval_policy == "never":
-            return False
-        try:
-            answer = input(f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] ")
-        except EOFError:
-            return False
-        return answer.strip().lower() in {"y", "yes"}
+        state = self.current_task_state
+        payload = {"call_id": self._active_call_id, "name": name, "args": args}
+        if self.cancel_event.is_set():
+            raise KeyboardInterrupt
+        if self.read_only or self.approval_policy == "never":
+            approved = False
+        elif self.approval_policy == "auto":
+            approved = True
+        else:
+            if state is not None:
+                self.emit_trace(state, "approval_requested", payload)
+            approved = bool(self.approval_handler(name, self.redact_artifact(args))) if self.approval_handler is not None else False
+        if state is not None:
+            self.emit_trace(state, "approval_resolved", {**payload, "approved": approved})
+        return approved
 
     def reset(self):
         self.session["history"] = []

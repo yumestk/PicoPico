@@ -6,6 +6,7 @@
 """
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -222,6 +223,31 @@ def build_welcome(agent, model, host):
     return "\n".join([line, *rows, line])
 
 
+def display_event(event):
+    name = event['event']
+    if name == 'model_requested':
+        message = 'Requesting model'
+    elif name == 'tool_started':
+        message = f"Using {event['name']}"
+    elif name == 'tool_executed':
+        message = f"{event['name']}: {event['tool_status']}"
+    elif name == 'approval_requested':
+        message = f"Waiting for approval: {event['name']}"
+    elif name == 'run_finished':
+        message = f"Run {event['status']} ({event['stop_reason']})"
+    else:
+        return
+    print(f"[pico] {message}", file=sys.stderr, flush=True)
+
+
+def console_approve(name, args):
+    print(f"approve {name} {json.dumps(args, ensure_ascii=False)}? [y/N] ", file=sys.stderr, end='', flush=True)
+    try:
+        return input().strip().lower() in {'y', 'yes'}
+    except EOFError:
+        return False
+
+
 def build_agent(args):
     """根据 CLI 参数装配出一个可运行的 Pico 实例。
 
@@ -258,6 +284,8 @@ def build_agent(args):
             max_steps=args.max_steps,
             max_new_tokens=args.max_new_tokens,
             secret_env_names=configured_secret_names,
+            approval_handler=console_approve,
+            event_handler=display_event,
         )
     return Pico(
         model_client=model,
@@ -267,6 +295,8 @@ def build_agent(args):
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
+        approval_handler=console_approve,
+        event_handler=display_event,
     )
 
 
@@ -310,21 +340,32 @@ def build_arg_parser():
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
-    agent = build_agent(args)
+    try:
+        agent = build_agent(args)
+    except (ValueError, RuntimeError, OSError) as exc:
+        from .security import redact_text
+        print(redact_text(str(exc)), file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
 
     model = getattr(agent.model_client, "model", getattr(args, "model", DEFAULT_OLLAMA_MODEL))
     host = getattr(agent.model_client, "host", getattr(agent.model_client, "base_url", getattr(args, "host", DEFAULT_OLLAMA_HOST)))
-    print(build_welcome(agent, model=model, host=host))
+    print(build_welcome(agent, model=model, host=host), file=sys.stderr)
 
     if args.prompt:
         # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
         prompt = " ".join(args.prompt).strip()
         if prompt:
-            print()
+            print(file=sys.stderr)
             try:
                 print(agent.ask(prompt))
-            except RuntimeError as exc:
-                print(str(exc), file=sys.stderr)
+                if agent.current_task_state.status == "cancelled":
+                    return 130
+                if agent.current_task_state.status != "completed":
+                    return 1
+            except (RuntimeError, ValueError, OSError) as exc:
+                print(agent.redact_text(str(exc)), file=sys.stderr)
                 return 1
         return 0
 
@@ -332,7 +373,8 @@ def main(argv=None):
         # 交互模式：每次读取一条用户输入，交给同一个 agent，
         # 因此 session history 和 working memory 会跨轮延续。
         try:
-            user_input = input("\npico> ").strip()
+            print("\npico> ", file=sys.stderr, end="", flush=True)
+            user_input = input().strip()
         except (EOFError, KeyboardInterrupt):
             print("")
             return 0
@@ -355,8 +397,8 @@ def main(argv=None):
             print("session reset")
             continue
 
-        print()
+        print(file=sys.stderr)
         try:
             print(agent.ask(user_input))
-        except RuntimeError as exc:
-            print(str(exc), file=sys.stderr)
+        except (RuntimeError, ValueError, OSError) as exc:
+            print(agent.redact_text(str(exc)), file=sys.stderr)

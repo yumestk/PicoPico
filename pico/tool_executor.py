@@ -35,6 +35,8 @@ class ToolExecutor:
 
     def execute(self, name, args):
         agent = self.agent
+        if agent.cancel_event.is_set():
+            return ToolExecutionResult(status="cancelled", error_code="tool_cancelled", message="Run cancelled before tool execution")
         if agent.allowed_tools is not None and name not in agent.allowed_tools:
             return ToolExecutionResult(
                 message=f"tool '{name}' is not allowed in this run", status="rejected", error_code="tool_not_allowed",
