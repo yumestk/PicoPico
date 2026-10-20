@@ -11,7 +11,6 @@ import re
 import threading
 import time
 import uuid
-from datetime import datetime
 from pathlib import Path
 
 from . import checkpoint as checkpointlib
@@ -72,8 +71,10 @@ class Pico:
         approval_handler=None,
         event_handler=None,
         cancel_event=None,
+        execution_lock_fd=None,
     ):
         self.approval_handler = approval_handler
+        self.execution_lock_fd = execution_lock_fd
         self.event_handler = event_handler
         self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self._active_call_id = None
@@ -92,12 +93,14 @@ class Pico:
         self.read_only = read_only
         self.shell_env_allowlist = tuple(shell_env_allowlist or DEFAULT_SHELL_ENV_ALLOWLIST)
         self.secret_env_names = {str(name).upper() for name in (secret_env_names or ())}
+        if not self.store.managed:
+            self.store.secret_env_names.update(self.secret_env_names)
         self.feature_flags = dict(DEFAULT_FEATURE_FLAGS)
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
         self.allowed_tools = self._normalize_allowed_tools(allowed_tools)
         self.session = session or {
-            "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+            "id": "session_" + uuid.uuid4().hex,
             "created_at": now(),
             "workspace_root": workspace.repo_root,
             "format": "native-v1",
@@ -566,6 +569,9 @@ class Pico:
             max_depth=self.max_depth,
             spawn_delegate=self.spawn_delegate,
             cancel_event=self.cancel_event,
+            process_started=(lambda pid,token:self.store.process_started(self.current_run_state.run_id,pid,token)) if self.store.managed else None,
+            process_stopped=(lambda token:self.store.process_stopped(self.current_run_state.run_id,token)) if self.store.managed else None,
+            execution_lock_fd=getattr(self,'execution_lock_fd',None),
         )
 
     def spawn_delegate(self, args):

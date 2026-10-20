@@ -235,7 +235,8 @@ def tool_run_shell(context, args):
     if timeout < 1 or timeout > 120:
         raise ValueError("timeout must be in [1, 120]")
     return run_command(command, context.root, context.shell_env(), timeout=timeout,
-                       cancel_event=getattr(context, 'cancel_event', None))
+                       cancel_event=context.cancel_event, process_started=context.process_started,
+                       process_stopped=context.process_stopped, execution_lock_fd=context.execution_lock_fd)
 
 
 def tool_write_file(context, args):

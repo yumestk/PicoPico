@@ -10,10 +10,11 @@ from zoneinfo import ZoneInfo
 
 from pico.providers.types import ModelResponse, ToolCall
 
+from ..application import ApplicationService, create_runtime
 from ..features import memory as memorylib
 from ..providers.clients import FakeModelClient
 from ..run_state import STOP_REASON_FINAL_ANSWER_RETURNED
-from ..runtime import Pico, StateStore
+from ..runtime import StateStore
 from ..tools import legal_tool_names
 from ..workspace import WorkspaceContext
 
@@ -459,15 +460,9 @@ class BenchmarkEvaluator:
             model_client = self.model_client_factory(task=task, workspace=workspace)
         else:
             model_client = FakeModelClient(_scripted_outputs_for_task(task))
-        agent = Pico(
-            model_client=model_client,
-            workspace=workspace,
-            store=session_store,
-            approval_policy="auto",
-            max_steps=int(task["step_budget"]),
-            max_new_tokens=self.max_new_tokens,
-            allowed_tools=task["allowed_tools"],
-        )
+        agent=create_runtime({'approval':'auto','max_steps':int(task['step_budget']),
+                              'max_new_tokens':self.max_new_tokens,'allowed_tools':task['allowed_tools']},
+                             workspace,session_store,model_client=model_client)
         _apply_task_setup(agent, task, fixture_copy_root)
 
         initial_history_empty = len(agent.session["history"]) == 0
@@ -476,7 +471,7 @@ class BenchmarkEvaluator:
         initial_task_summary_empty = not str(initial_memory_state["working"]["task_summary"]).strip()
         initial_episodic_notes_empty = not initial_memory_state["episodic_notes"]
 
-        final_answer = agent.ask(task["prompt"])
+        final_answer = ApplicationService.run(agent,task["prompt"])
         run_state = agent.current_run_state
         run_dir = agent.store.export_run(run_state)
         # The locked verifier consumes report.json under .pico/runs. Explicitly export there.

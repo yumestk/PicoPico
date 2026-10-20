@@ -14,6 +14,7 @@ from pico import (
     WorkspaceContext,
     build_welcome,
 )
+from pico.application import build_runtime
 from pico.providers.types import ModelResponse, ToolCall
 
 
@@ -351,7 +352,7 @@ def test_build_agent_uses_openai_provider_and_model_override(tmp_path):
     ), patch("pico.application.OpenAICompatibleModelClient") as mock_openai:
         fake_client = mock_openai.return_value
         fake_client.protocol = "fake"
-        agent = pico_pkg.build_agent(args)
+        agent = build_runtime(args)
 
     mock_openai.assert_called_once()
     assert mock_openai.call_args.kwargs["model"] == "override-model"
@@ -389,7 +390,7 @@ def test_build_agent_uses_right_codes_shared_key_for_openai_provider(tmp_path):
         ), patch("pico.application.OpenAICompatibleModelClient") as mock_openai:
             fake_client = mock_openai.return_value
             fake_client.protocol = "fake"
-            agent = pico_pkg.build_agent(args)
+            agent = build_runtime(args)
 
     mock_openai.assert_called_once()
     assert mock_openai.call_args.kwargs["api_key"] == "sk-right-codes"
@@ -439,7 +440,7 @@ def test_build_agent_uses_project_env_provider_when_cli_omitted(tmp_path):
     ), patch("pico.application.OpenAICompatibleModelClient") as mock_openai:
         fake_client = mock_openai.return_value
         fake_client.protocol = "fake"
-        agent = pico_pkg.build_agent(args)
+        agent = build_runtime(args)
 
     mock_openai.assert_called_once()
     assert mock_openai.call_args.kwargs["model"] == "gpt-5.4"
@@ -475,7 +476,7 @@ def test_build_agent_prefers_cli_provider_over_project_env_provider(tmp_path):
     ), patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
         fake_client = mock_anthropic.return_value
         fake_client.protocol = "fake"
-        agent = pico_pkg.build_agent(args)
+        agent = build_runtime(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
@@ -521,7 +522,7 @@ def test_build_agent_uses_anthropic_provider_and_openai_key_fallback(tmp_path):
     ), patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
         fake_client = mock_anthropic.return_value
         fake_client.protocol = "fake"
-        agent = pico_pkg.build_agent(args)
+        agent = build_runtime(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "claude-sonnet-4-5-20250929"
@@ -541,7 +542,7 @@ def test_build_agent_uses_anthropic_default_model_when_env_is_missing(tmp_path):
         os.environ.pop("ANTHROPIC_MODEL", None)
         with patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
             mock_anthropic.return_value.protocol = "fake"
-            pico_pkg.build_agent(args)
+            build_runtime(args)
 
     assert mock_anthropic.call_args.kwargs["model"] == "claude-sonnet-4-6"
 
@@ -598,7 +599,7 @@ def test_build_agent_uses_deepseek_provider_and_env_configuration(tmp_path):
     ), patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
         fake_client = mock_anthropic.return_value
         fake_client.protocol = "fake"
-        agent = pico_pkg.build_agent(args)
+        agent = build_runtime(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
@@ -614,7 +615,7 @@ def test_build_agent_uses_deepseek_default_model_when_env_is_missing(tmp_path):
     with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-deepseek"}, clear=True):
         with patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
             mock_anthropic.return_value.protocol = "fake"
-            pico_pkg.build_agent(args)
+            build_runtime(args)
 
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
     assert mock_anthropic.call_args.kwargs["base_url"] == "https://api.deepseek.com/anthropic"
@@ -639,7 +640,7 @@ def test_build_agent_uses_deepseek_provider_by_default(tmp_path):
     ), patch("pico.application.AnthropicCompatibleModelClient") as mock_anthropic:
         fake_client = mock_anthropic.return_value
         fake_client.protocol = "fake"
-        agent = pico_pkg.build_agent(args)
+        agent = build_runtime(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
@@ -1402,27 +1403,14 @@ def test_public_api_exports_resolve_through_package_path():
     assert Path(pico_pkg.__file__).as_posix().endswith("/pico/__init__.py")
 
 
-def test_reviewer_skeleton_docs_exist():
-    review_pack = Path("docs/review-pack/README.md")
-    architecture = Path("docs/architecture/agent-harness-v1-overview.md")
-
-    assert review_pack.exists()
-    assert architecture.exists()
-
-    review_text = review_pack.read_text(encoding="utf-8")
-    assert "Project pitch" in review_text
-    assert "Architecture map" in review_text
-    assert "Benchmark evidence" in review_text
-    assert "Sample run artifact list" in review_text
-
-    architecture_text = architecture.read_text(encoding="utf-8")
-    assert "Agent Harness v1" in architecture_text
-    assert "task state" in architecture_text.lower()
+def test_local_docs_are_not_tracked():
+    result=subprocess.run(['git','ls-files','docs'],capture_output=True,text=True,check=True)
+    assert not result.stdout.strip()
 
 
 def test_package_import_surface_includes_cli_entrypoints():
     assert callable(pico_pkg.main)
-    assert callable(pico_pkg.build_agent)
+    assert callable(pico_pkg.ApplicationService)
     assert callable(pico_pkg.build_arg_parser)
 
 

@@ -1,24 +1,16 @@
-"""命令行入口。
-
-这个模块负责把“用户怎么启动 pico”翻译成 runtime 能理解的对象：
-解析参数、挑模型后端、构建工作区快照、恢复或新建 session，
-最后进入 one-shot 或交互式循环。
-"""
+"""Terminal client for the workspace Host; execution belongs to the service."""
 
 import argparse
 import json
 import shutil
 import sys
-import textwrap
+from types import SimpleNamespace
 
-from .application import (
-    DEFAULT_OLLAMA_HOST,
-    DEFAULT_OLLAMA_MODEL,
-    PROVIDER_CHOICES,
-    ApplicationService,
-    build_agent,
-)
-from .workspace import middle
+from .application import DEFAULT_OPTIONS, PROVIDER_CHOICES
+from .host_client import HostClient
+from .security import redact_text
+from .state_store import TERMINAL, ApplicationError, identity
+from .workspace import WorkspaceContext, middle
 
 WELCOME_ART = (
     "        /\\___/\\\\",
@@ -26,29 +18,15 @@ WELCOME_ART = (
     "       /   ^   \\\\",
     "      /|       |\\\\",
 )
+
+
 WELCOME_NAME = "pico"
+
+
 WELCOME_SUBTITLE = "local coding agent"
+
+
 WELCOME_STATUS = "calm shell, ready for work"
-HELP_DETAILS = textwrap.dedent(
-    """\
-    Commands:
-    /help    Show this help message.
-    /memory  Show the agent's distilled working memory.
-    /session Show the path to the saved session file.
-    /reset   Clear the current session history and memory.
-    /exit    Exit the agent.
-    """
-).strip()
-
-
-
-
-
-
-
-
-
-
 
 
 def build_welcome(agent, model, host):
@@ -97,16 +75,16 @@ def build_welcome(agent, model, host):
 
 
 def display_event(event):
-    name = event['event']
-    if name == 'model_requested':
-        message = 'Requesting model'
-    elif name == 'tool_started':
+    name = event["event"]
+    if name == "model_requested":
+        message = "Requesting model"
+    elif name == "tool_started":
         message = f"Using {event['name']}"
-    elif name == 'tool_executed':
+    elif name == "tool_executed":
         message = f"{event['name']}: {event['tool_status']} ({event.get('duration_ms', 0)} ms)"
-    elif name == 'approval_requested':
+    elif name == "approval_requested":
         message = f"Waiting for approval: {event['name']}"
-    elif name == 'run_finished':
+    elif name == "run_finished":
         message = f"Run {event['status']} ({event['stop_reason']})"
     else:
         return
@@ -114,114 +92,268 @@ def display_event(event):
 
 
 def console_approve(name, args):
-    print(f"approve {name} {json.dumps(args, ensure_ascii=False)}? [y/N] ", file=sys.stderr, end='', flush=True)
-    try:
-        return input().strip().lower() in {'y', 'yes'}
-    except EOFError:
-        return False
-
-
-
-
-def build_arg_parser():
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Minimal coding agent for DeepSeek, OpenAI-compatible, Anthropic-compatible, or Ollama models.",
+    print(
+        f"approve {name} {json.dumps(args, ensure_ascii=False)}? [y/N] ",
+        file=sys.stderr,
+        end="",
+        flush=True,
     )
-    parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
-    parser.add_argument("--cwd", default=".", help="Workspace directory.")
-    parser.add_argument(
-        "--provider",
-        choices=PROVIDER_CHOICES,
-        default=None,
-        help="Model backend to use. Defaults to PICO_PROVIDER or deepseek.",
-    )
-    parser.add_argument(
-        "--model",
-        default=None,
-        help="Model name override. Defaults to qwen3.5:4b for Ollama, PICO_OPENAI_MODEL for openai, PICO_ANTHROPIC_MODEL for anthropic, and PICO_DEEPSEEK_MODEL for deepseek when set.",
-    )
-    parser.add_argument("--host", default=DEFAULT_OLLAMA_HOST, help="Ollama server URL.")
-    parser.add_argument("--base-url", default=None, help="Provider API base URL for deepseek, openai, or anthropic.")
-    parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
-    parser.add_argument("--openai-timeout", type=int, default=300, help="OpenAI-compatible request timeout in seconds.")
-    parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
-    parser.add_argument("--approval", choices=("ask", "auto", "never"), default="ask", help="Approval policy for risky tools.")
+    return input().strip().lower() in {"y", "yes"}
+
+
+def add_options(parser, suppress=False):
+    def option(name, **kwargs):
+        key = name.replace("-", "_")
+        default = DEFAULT_OPTIONS.get(key)
+        parser.add_argument(
+            "--" + name, default=argparse.SUPPRESS if suppress else default, **kwargs
+        )
+
+    option("provider", choices=PROVIDER_CHOICES)
+    for name in ["model", "host", "base-url"]:
+        option(name)
+    for name in ["ollama-timeout", "openai-timeout", "max-steps", "max-new-tokens"]:
+        option(name, type=int)
+    for name in ["temperature", "top-p"]:
+        option(name, type=float)
+    option("approval", choices=["ask", "auto", "never"])
     parser.add_argument(
         "--secret-env-name",
         dest="secret_env_names",
         action="append",
-        default=[],
-        help="Extra environment variable names to treat as secrets for trace/report redaction.",
+        default=argparse.SUPPRESS if suppress else [],
     )
-    parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
-    parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
-    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")
+    parser.add_argument("--cwd", default=argparse.SUPPRESS if suppress else ".")
+    parser.add_argument(
+        "--session",
+        default=argparse.SUPPRESS if suppress else None,
+        help="Database session ID, or latest.",
+    )
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description="Pico: local coding agent with a reconnectable workspace Host."
+    )
+    add_options(parser)
+    commands = parser.add_subparsers(dest="command")
+    run = commands.add_parser("run", help="Submit a task and attach to its progress.")
+    add_options(run, True)
+    run.add_argument("prompt", nargs="+")
+    run.add_argument(
+        "--detach",
+        action="store_true",
+        help="Print run ID and leave execution with the Host.",
+    )
+    chat = commands.add_parser("chat", help="Interactive session (default command).")
+    add_options(chat, True)
+    host = commands.add_parser("host")
+    host.add_argument("action", choices=["start", "status", "stop"])
+    host.add_argument("--cwd", default=argparse.SUPPRESS)
+    runs = commands.add_parser("runs")
+    runs.add_argument("action", choices=["list", "get", "attach", "cancel", "export"])
+    runs.add_argument("run_id", nargs="?")
+    runs.add_argument("--after", type=int, default=0)
+    runs.add_argument("--cwd", default=argparse.SUPPRESS)
+    approvals = commands.add_parser("approvals")
+    approvals.add_argument("action", choices=["list", "approve", "deny"])
+    approvals.add_argument("approval_id", nargs="?")
+    approvals.add_argument("--cwd", default=argparse.SUPPRESS)
+    sessions = commands.add_parser("sessions")
+    sessions.add_argument("action", choices=["list", "get", "create", "reset"])
+    sessions.add_argument("session_id", nargs="?")
+    add_options(sessions, True)
     return parser
+
+
+def attach(client, run_id, after=0):
+    cancelling = False
+    while True:
+        try:
+            page = client.call(
+                "runs.events",
+                {
+                    "run_id": run_id,
+                    "after_sequence": after,
+                    "wait_ms": 1000,
+                    "limit": 100,
+                },
+            )
+            for event in page["events"]:
+                display_event(event)
+                after = event["sequence"]
+            if not cancelling:
+                for approval in client.call("approvals.list"):
+                    if approval["run_id"] == run_id:
+                        approved = console_approve(approval["name"], approval["args"])
+                        try:
+                            client.call(
+                                "approvals.resolve",
+                                {"approval_id": approval["id"], "approved": approved},
+                            )
+                        except ApplicationError as exc:
+                            if exc.code not in {
+                                "approval_expired",
+                                "approval_conflict",
+                            }:
+                                raise
+                            print(str(exc), file=sys.stderr)
+            run = client.call("runs.get", {"run_id": run_id})
+            if run["status"] in TERMINAL and after >= run["last_sequence"]:
+                if run["final_answer"]:
+                    print(run["final_answer"])
+                return (
+                    0
+                    if run["status"] == "completed"
+                    else 130
+                    if run["status"] == "cancelled"
+                    else 1
+                )
+        except KeyboardInterrupt:
+            if cancelling:
+                return 130
+            client.call("runs.cancel", {"run_id": run_id})
+            cancelling = True
+        except EOFError:
+            print(
+                f"Detached. Reconnect with: pico runs attach {run_id}", file=sys.stderr
+            )
+            return 0
 
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
     try:
-        agent = build_agent(args, approval_handler=console_approve, event_handler=display_event)
-    except (ValueError, RuntimeError, OSError) as exc:
-        from .security import redact_text
-        print(redact_text(str(exc)), file=sys.stderr)
-        return 1
+        workspace = WorkspaceContext.build(args.cwd)
+        client = HostClient(workspace.repo_root)
+        if args.command == "host":
+            result = (
+                client.ensure()
+                if args.action == "start"
+                else client.call(
+                    "host.info" if args.action == "status" else "host.stop"
+                )
+            )
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        client.ensure()
+        if args.command == "runs":
+            if args.action != "list" and not args.run_id:
+                raise ApplicationError("invalid_request", "A run ID is required")
+            if args.action == "attach":
+                return attach(client, args.run_id, args.after)
+            params = {} if args.action == "list" else {"run_id": args.run_id}
+            print(
+                json.dumps(
+                    client.call("runs." + args.action, params), ensure_ascii=False
+                )
+            )
+            return 0
+        if args.command == "approvals":
+            if args.action == "list":
+                result = client.call("approvals.list")
+            else:
+                if not args.approval_id:
+                    raise ApplicationError(
+                        "invalid_request", "An approval ID is required"
+                    )
+                result = client.call(
+                    "approvals.resolve",
+                    {
+                        "approval_id": args.approval_id,
+                        "approved": args.action == "approve",
+                    },
+                )
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        config = {key: getattr(args, key) for key in DEFAULT_OPTIONS}
+        if args.command == "sessions":
+            if args.action == "list":
+                result = client.call("sessions.list")
+            elif args.action == "create":
+                result = client.call("sessions.create", {"config": config})
+            else:
+                if not args.session_id:
+                    raise ApplicationError(
+                        "invalid_request", "A session ID is required"
+                    )
+                result = client.call(
+                    "sessions." + args.action, {"session_id": args.session_id}
+                )
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        session_id = args.session
+        if session_id == "latest":
+            existing = client.call("sessions.list")
+            session_id = existing[0]["id"] if existing else None
+        session = (
+            client.call("sessions.get", {"session_id": session_id})
+            if session_id
+            else client.call("sessions.create", {"config": config})
+        )
+        view = SimpleNamespace(
+            workspace=workspace,
+            session=session,
+            approval_policy=session["config"]["approval"],
+        )
+        print(
+            build_welcome(
+                view,
+                session["config"]["model"],
+                session["config"].get("base_url") or session["config"]["host"],
+            ),
+            file=sys.stderr,
+        )
+
+        def submit(prompt):
+            return client.call(
+                "runs.start",
+                {
+                    "session_id": session["id"],
+                    "prompt": prompt,
+                    "client_request_id": identity("submit"),
+                },
+            )
+
+        if args.command == "run":
+            run = submit(" ".join(args.prompt))
+            if args.detach:
+                print(run["run_id"])
+                return 0
+            return attach(client, run["run_id"])
+        while True:
+            try:
+                print("pico> ", end="", file=sys.stderr, flush=True)
+                prompt = input().strip()
+            except (EOFError, KeyboardInterrupt):
+                return 0
+            if not prompt:
+                continue
+            if prompt in {"/exit", "/quit"}:
+                return 0
+            if prompt == "/help":
+                print("/session  /memory  /reset  /exit", file=sys.stderr)
+                continue
+            if prompt == "/session":
+                print(session["id"], file=sys.stderr)
+                continue
+            if prompt == "/memory":
+                print(
+                    json.dumps(
+                        client.call("sessions.get", {"session_id": session["id"]})[
+                            "memory"
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                )
+                continue
+            if prompt == "/reset":
+                session = client.call("sessions.reset", {"session_id": session["id"]})
+                continue
+            attach(client, submit(prompt)["run_id"])
     except KeyboardInterrupt:
         return 130
-
-    model = getattr(agent.model_client, "model", getattr(args, "model", DEFAULT_OLLAMA_MODEL))
-    host = getattr(agent.model_client, "host", getattr(agent.model_client, "base_url", getattr(args, "host", DEFAULT_OLLAMA_HOST)))
-    print(build_welcome(agent, model=model, host=host), file=sys.stderr)
-
-    if args.prompt:
-        # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
-        prompt = " ".join(args.prompt).strip()
-        if prompt:
-            print(file=sys.stderr)
-            try:
-                print(ApplicationService.run(agent, prompt))
-                if agent.current_run_state.status == "cancelled":
-                    return 130
-                if agent.current_run_state.status != "completed":
-                    return 1
-            except (RuntimeError, ValueError, OSError) as exc:
-                print(agent.redact_text(str(exc)), file=sys.stderr)
-                return 1
-        return 0
-
-    while True:
-        # 交互模式：每次读取一条用户输入，交给同一个 agent，
-        # 因此 session history 和 working memory 会跨轮延续。
-        try:
-            print("\npico> ", file=sys.stderr, end="", flush=True)
-            user_input = input().strip()
-        except (EOFError, KeyboardInterrupt):
-            print(file=sys.stderr)
-            return 0
-
-        if not user_input:
-            continue
-        if user_input in {"/exit", "/quit"}:
-            return 0
-        if user_input == "/help":
-            print(HELP_DETAILS)
-            continue
-        if user_input == "/memory":
-            print(agent.memory_text())
-            continue
-        if user_input == "/session":
-            print(agent.session["id"], agent.store.path)
-            continue
-        if user_input == "/reset":
-            agent.reset()
-            print("session reset")
-            continue
-
-        print(file=sys.stderr)
-        try:
-            print(ApplicationService.run(agent, user_input))
-        except (RuntimeError, ValueError, OSError) as exc:
-            print(agent.redact_text(str(exc)), file=sys.stderr)
+    except (ApplicationError, RuntimeError, OSError) as exc:
+        print(redact_text(str(exc)), file=sys.stderr)
+        return 1

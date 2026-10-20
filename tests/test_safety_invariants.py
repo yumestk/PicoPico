@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from pico import FakeModelClient, Pico, StateStore, WorkspaceContext
 from pico import cli as pico_cli
+from pico.application import build_runtime
 from pico.providers.types import ModelResponse, ToolCall
 from pico.run_state import RunState
 
@@ -95,7 +96,7 @@ def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
                 "GH_PAT",
             ]
         )
-        agent = pico_cli.build_agent(args)
+        agent = build_runtime(args)
         assert set(agent.secret_env_summary()["secret_env_names"]) == {"GITHUB_PAT", "GH_PAT"}
 
 
@@ -115,7 +116,7 @@ def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
         DummyModelClient,
     ):
         args = pico_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
-        agent = pico_cli.build_agent(args)
+        agent = build_runtime(args)
         assert agent.secret_env_summary()["secret_env_names"] == ["GH_PAT"]
 
 
@@ -133,7 +134,7 @@ def test_cli_build_agent_loads_project_env_secrets_before_redaction_setup(tmp_pa
     (tmp_path / ".env").write_text("PICO_DEEPSEEK_API_KEY=sk-project-secret\n", encoding="utf-8")
     with patch.dict(os.environ, {}, clear=True), patch("pico.application.AnthropicCompatibleModelClient", DummyModelClient):
         args = pico_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--provider", "deepseek"])
-        agent = pico_cli.build_agent(args)
+        agent = build_runtime(args)
         assert agent.secret_env_summary()["secret_env_names"] == ["PICO_DEEPSEEK_API_KEY"]
 
 
@@ -157,7 +158,7 @@ def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
         clear=True,
     ), patch("pico.application.OllamaModelClient", DummyModelClient):
         args = pico_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
-        agent = pico_cli.build_agent(args)
+        agent = build_runtime(args)
         assert agent.secret_env_summary()["secret_env_names"] == ["PICO_CUSTOM_SECRET"]
 
 

@@ -154,22 +154,32 @@ def test_completion_persistence_failure_cannot_leave_a_completed_terminal_event(
 
 
 def test_cli_progress_and_approval_do_not_pollute_stdout(tmp_path, capsys):
-    agent = agent_at(tmp_path, [ModelResponse(tool_calls=[ToolCall('write_file', {'path': 'ok', 'content': 'ok'})]),
-                               ModelResponse(text='Done')], approval_policy='ask', approval_handler=cli.console_approve,
-                     event_handler=cli.display_event)
-    with patch('pico.cli.build_agent', return_value=agent), patch('builtins.input', return_value='yes'):
-        assert cli.main(['write']) == 0
-    output = capsys.readouterr()
-    assert output.out == 'Done\n'
+    class Client:
+        def call(self,method,params=None):
+            if method=='runs.events':return {'events':[{'event':'tool_started','name':'write_file','sequence':1}]}
+            if method=='approvals.list':return [{'run_id':'r','id':'a','name':'write_file','args':{'path':'ok'}}]
+            if method=='approvals.resolve':return {'status':'approved'}
+            if method=='runs.get':return {'status':'completed','final_answer':'Done','last_sequence':1}
+    with patch('builtins.input',return_value='yes'):
+        assert cli.attach(Client(),'r')==0
+    output=capsys.readouterr()
+    assert output.out=='Done\n'
     assert 'Using write_file' in output.err and 'approve write_file' in output.err
 
 
-def test_cli_model_interrupt_returns_130_without_traceback(tmp_path, capsys):
-    agent = agent_at(tmp_path, [])
-    with patch.object(agent.model_client, 'complete', side_effect=KeyboardInterrupt), patch('pico.cli.build_agent', return_value=agent):
-        assert cli.main(['inspect']) == 130
+def test_cli_interrupt_sends_remote_cancel_and_returns_130(capsys):
+    class Client:
+        cancelled=False
+        def call(self,method,params=None):
+            if method=='runs.events':
+                if not self.cancelled:raise KeyboardInterrupt
+                return {'events':[]}
+            if method=='runs.cancel':self.cancelled=True;return {'status':'cancelling'}
+            if method=='runs.get':return {'status':'cancelled','final_answer':'Cancelled','last_sequence':0}
+    client=Client()
+    assert cli.attach(client,'r')==130
+    assert client.cancelled
     assert 'Traceback' not in capsys.readouterr().err
-    assert_terminal(agent, 'cancelled')
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='POSIX signals')

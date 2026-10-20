@@ -14,6 +14,9 @@ class ToolContext:
     max_depth: int
     spawn_delegate: Callable[[dict], str]
     cancel_event: object = None
+    process_started: object = None
+    process_stopped: object = None
+    execution_lock_fd: object = None
 
     def path(self, raw_path):
         return self.path_resolver(str(raw_path))

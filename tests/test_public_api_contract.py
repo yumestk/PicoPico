@@ -2,21 +2,22 @@ from pathlib import Path
 
 import pico
 from pico import (
+    ApplicationService,
     Pico,
     StateStore,
     WorkspaceContext,
-    build_agent,
     build_arg_parser,
     build_welcome,
     main,
 )
+from pico.application import build_runtime
 
 
 def test_public_api_exports_current_names_only():
     assert Pico is not None
     assert StateStore is not None
     assert WorkspaceContext is not None
-    assert callable(build_agent)
+    assert callable(ApplicationService)
     assert callable(build_arg_parser)
     assert callable(build_welcome)
     assert callable(main)
@@ -28,7 +29,7 @@ def test_build_agent_returns_pico(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     args = build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
 
-    agent = build_agent(args)
+    agent = build_runtime(args)
 
     assert isinstance(agent, Pico)
 

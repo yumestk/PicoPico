@@ -1,6 +1,9 @@
 """Application assembly: one place resolves workspace, model and execution policy."""
 
+import asyncio
 import os
+from dataclasses import asdict
+from types import SimpleNamespace
 
 from .config import load_project_env, provider_env
 from .providers.clients import (
@@ -107,9 +110,7 @@ def _configured_secret_names(args):
     extra_names = os.environ.get(SECRET_ENV_NAMES_VAR, "")
     if extra_names.strip():
         configured_secret_names.update(
-            item.strip().upper()
-            for item in extra_names.split(",")
-            if item.strip()
+            item.strip().upper() for item in extra_names.split(",") if item.strip()
         )
     return sorted(configured_secret_names)
 
@@ -120,42 +121,68 @@ def _build_model_client(args):
     # 原生消息格式、工具声明和 HTTP 协议差异由 provider adapter 负责。
     if provider == "openai":
         model = _effective_model(args, provider)
-        base_url = getattr(args, "base_url", None) or provider_env("PICO_OPENAI_API_BASE", ("OPENAI_API_BASE",), DEFAULT_OPENAI_BASE_URL)
+        base_url = getattr(args, "base_url", None) or provider_env(
+            "PICO_OPENAI_API_BASE", ("OPENAI_API_BASE",), DEFAULT_OPENAI_BASE_URL
+        )
         api_key = provider_env(
             "PICO_OPENAI_API_KEY",
-            ("OPENAI_API_KEY", "PICO_RIGHT_CODES_API_KEY", "RIGHT_CODES_API_KEY", "PICO_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
+            (
+                "OPENAI_API_KEY",
+                "PICO_RIGHT_CODES_API_KEY",
+                "RIGHT_CODES_API_KEY",
+                "PICO_ANTHROPIC_API_KEY",
+                "ANTHROPIC_API_KEY",
+            ),
         )
         return OpenAICompatibleModelClient(
             model=model,
             base_url=base_url,
             api_key=api_key,
             temperature=args.temperature,
-            timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
+            timeout=getattr(
+                args, "openai_timeout", getattr(args, "ollama_timeout", 300)
+            ),
         )
     if provider == "anthropic":
         model = _effective_model(args, provider)
-        base_url = getattr(args, "base_url", None) or provider_env("PICO_ANTHROPIC_API_BASE", ("ANTHROPIC_API_BASE",), DEFAULT_ANTHROPIC_BASE_URL)
+        base_url = getattr(args, "base_url", None) or provider_env(
+            "PICO_ANTHROPIC_API_BASE",
+            ("ANTHROPIC_API_BASE",),
+            DEFAULT_ANTHROPIC_BASE_URL,
+        )
         api_key = provider_env(
             "PICO_ANTHROPIC_API_KEY",
-            ("ANTHROPIC_API_KEY", "PICO_RIGHT_CODES_API_KEY", "RIGHT_CODES_API_KEY", "PICO_OPENAI_API_KEY", "OPENAI_API_KEY"),
+            (
+                "ANTHROPIC_API_KEY",
+                "PICO_RIGHT_CODES_API_KEY",
+                "RIGHT_CODES_API_KEY",
+                "PICO_OPENAI_API_KEY",
+                "OPENAI_API_KEY",
+            ),
         )
         return AnthropicCompatibleModelClient(
             model=model,
             base_url=base_url,
             api_key=api_key,
             temperature=args.temperature,
-            timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
+            timeout=getattr(
+                args, "openai_timeout", getattr(args, "ollama_timeout", 300)
+            ),
         )
     if provider == "deepseek":
         model = _effective_model(args, provider)
-        base_url = getattr(args, "base_url", None) or provider_env("PICO_DEEPSEEK_API_BASE", ("DEEPSEEK_API_BASE",), DEFAULT_DEEPSEEK_BASE_URL)
+        base_url = getattr(args, "base_url", None) or provider_env(
+            "PICO_DEEPSEEK_API_BASE", ("DEEPSEEK_API_BASE",), DEFAULT_DEEPSEEK_BASE_URL
+        )
         api_key = provider_env("PICO_DEEPSEEK_API_KEY", ("DEEPSEEK_API_KEY",))
         return AnthropicCompatibleModelClient(
             model=model,
             base_url=base_url,
             api_key=api_key,
             temperature=args.temperature,
-            timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
+            timeout=getattr(
+                args, "openai_timeout", getattr(args, "ollama_timeout", 300)
+            ),
             # Native blocks are replayed; retain the bounded non-thinking default
             # while reasoning-mode budgets are outside this stage.
             thinking={"type": "disabled"},
@@ -172,30 +199,17 @@ def _build_model_client(args):
     )
 
 
-def build_agent(args, approval_handler=None, event_handler=None):
-    """根据 CLI 参数装配出一个可运行的 Pico 实例。
+def build_runtime(args, approval_handler=None, event_handler=None):
+    """Build an inline runtime for focused configuration tests and harnesses.
 
-    为什么存在：
-    命令行参数只是字符串和开关，runtime 需要的是已经装配好的对象图：
-    model client、workspace snapshot、session store、secret 配置等。
-    这个函数负责把“启动参数”翻译成“agent 运行现场”。
-
-    输入 / 输出：
-    - 输入：`argparse` 解析后的 `args`
-    - 输出：一个新的 `Pico`，或一个从旧 session 恢复出来的 `Pico`
-
-    在 agent 链路里的位置：
-    它是整个程序启动链路里最靠近 runtime 的装配点。`main()` 先调它，
-    得到 agent 后，后面无论是 one-shot 还是 REPL 模式，都会落到 `ask()`。
+    Production clients submit runs through ApplicationService/Host instead.
     """
-    # 这里是 CLI 到 runtime 的装配点：
-    # 先采集工作区快照和加载项目级环境，再整理 secret 名单、模型后端和 session。
     workspace = WorkspaceContext.build(args.cwd)
     load_project_env(workspace.repo_root)
     configured_secret_names = _configured_secret_names(args)
     store = StateStore(workspace.repo_root)
     model = _build_model_client(args)
-    session_id = args.resume
+    session_id = getattr(args, "session", None)
     if session_id == "latest":
         session_id = store.latest_session()
     if session_id:
@@ -224,9 +238,299 @@ def build_agent(args, approval_handler=None, event_handler=None):
     )
 
 
+def create_runtime(
+    config, workspace, store, *, model_client=None, session=None, **execution
+):
+    """Assemble the same execution kernel for workers and deterministic harness runs."""
+    model = (
+        model_client
+        if model_client is not None
+        else _build_model_client(SimpleNamespace(**config))
+    )
+    return Pico(
+        model,
+        workspace,
+        store,
+        session=session,
+        approval_policy=config["approval"],
+        max_steps=config["max_steps"],
+        max_new_tokens=config["max_new_tokens"],
+        secret_env_names=config.get("secret_env_names", []),
+        allowed_tools=config.get("allowed_tools"),
+        **execution,
+    )
+
+
+DEFAULT_OPTIONS = {
+    "provider": None,
+    "model": None,
+    "base_url": None,
+    "host": DEFAULT_OLLAMA_HOST,
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "ollama_timeout": 300,
+    "openai_timeout": 300,
+    "approval": "ask",
+    "max_steps": 6,
+    "max_new_tokens": 512,
+    "secret_env_names": [],
+    "allowed_tools": None,
+}
+
+
+def freeze_options(root, supplied=None):
+    from .state_store import ApplicationError
+    from .tools import legal_tool_names
+
+    load_project_env(root)
+    supplied = supplied or {}
+    if not isinstance(supplied, dict) or set(supplied) - set(DEFAULT_OPTIONS):
+        raise ApplicationError("invalid_request", "Unknown runtime option")
+    options = {**DEFAULT_OPTIONS, **supplied}
+    for key in ["provider", "model", "base_url", "host"]:
+        if options[key] is not None and (
+            not isinstance(options[key], str) or not options[key].strip()
+        ):
+            raise ApplicationError(
+                "invalid_request", f"{key} must be a nonempty string"
+            )
+    for key, maximum in [
+        ("max_steps", 100),
+        ("max_new_tokens", 65536),
+        ("ollama_timeout", 3600),
+        ("openai_timeout", 3600),
+    ]:
+        if type(options[key]) is not int or not 1 <= options[key] <= maximum:
+            raise ApplicationError("invalid_request", f"Invalid {key}")
+    for key, minimum, maximum in [("temperature", 0, 2), ("top_p", 0, 1)]:
+        if (
+            type(options[key]) not in (int, float)
+            or not minimum <= options[key] <= maximum
+        ):
+            raise ApplicationError("invalid_request", f"Invalid {key}")
+    if options["approval"] not in {"ask", "auto", "never"}:
+        raise ApplicationError("invalid_request", "Invalid approval policy")
+    if not isinstance(options["secret_env_names"], list) or any(
+        not isinstance(v, str) for v in options["secret_env_names"]
+    ):
+        raise ApplicationError("invalid_request", "Invalid secret environment names")
+    if options["allowed_tools"] is not None and (
+        not isinstance(options["allowed_tools"], list)
+        or not options["allowed_tools"]
+        or any(v not in legal_tool_names() for v in options["allowed_tools"])
+    ):
+        raise ApplicationError("invalid_request", "Invalid allowed tools")
+    args = SimpleNamespace(**options)
+    options["provider"] = _effective_provider(args)
+    options["model"] = _effective_model(args, options["provider"])
+    options["secret_env_names"] = _configured_secret_names(args)
+    model = _build_model_client(SimpleNamespace(**options))
+    if hasattr(model, "base_url"):
+        options["base_url"] = model.base_url
+    return options, model.protocol
+
 
 class ApplicationService:
+    def __init__(self, root, *, test_script=None):
+        from .run_manager import RunManager
+
+        load_project_env(root)
+        self.secret_env_names = set(
+            _configured_secret_names(SimpleNamespace(secret_env_names=[]))
+        )
+        self.store = StateStore(root)
+        self.store.secret_env_names = self.secret_env_names
+        self.manager = RunManager(self.store)
+        self.test_script = test_script
+        self.stopping = asyncio.Event()
+
     @staticmethod
     def run(agent, prompt):
         from .run_state import RunState
+
         return agent.ask(prompt, run_id=RunState.create(user_request=prompt).run_id)
+
+    async def open(self):
+        await self.manager.recover()
+        return self
+
+    async def close(self):
+        await self.manager.close()
+        self.store.close()
+
+    async def dispatch(self, method, params=None):
+        from .features.memory import default_memory_state
+        from .security import redact_artifact
+        from .state_store import TERMINAL, ApplicationError, identity
+        from .workspace import now
+
+        specifications = {
+            "host.info": ({}, {}),
+            "host.stop": ({}, {}),
+            "sessions.create": ({}, {"config": dict}),
+            "sessions.list": ({}, {}),
+            "sessions.get": ({"session_id": str}, {}),
+            "sessions.reset": ({"session_id": str}, {}),
+            "runs.start": (
+                {"session_id": str, "prompt": str, "client_request_id": str},
+                {"config": dict},
+            ),
+            "runs.list": ({}, {"limit": int}),
+            "runs.get": ({"run_id": str}, {}),
+            "runs.cancel": ({"run_id": str}, {}),
+            "runs.export": ({"run_id": str}, {}),
+            "runs.events": (
+                {"run_id": str},
+                {"after_sequence": int, "limit": int, "wait_ms": int},
+            ),
+            "approvals.list": ({}, {}),
+            "approvals.resolve": ({"approval_id": str, "approved": bool}, {}),
+        }
+        if method not in specifications:
+            raise ApplicationError("invalid_request", "Unknown method")
+        params = {} if params is None else params
+        required, optional = specifications[method]
+        if (
+            not isinstance(params, dict)
+            or set(params) - set(required) - set(optional)
+            or set(required) - set(params)
+        ):
+            raise ApplicationError("invalid_request", "Invalid method parameters")
+        for key, value in params.items():
+            expected = {**required, **optional}[key]
+            if type(value) is not expected or (expected is str and not value.strip()):
+                raise ApplicationError("invalid_request", f"Invalid {key}")
+        for name, low, high in [
+            ("limit", 1, 500),
+            ("after_sequence", 0, 2**63 - 1),
+            ("wait_ms", 0, 20000),
+        ]:
+            if name in params and not low <= params[name] <= high:
+                raise ApplicationError("invalid_request", f"Invalid {name}")
+
+        def public_session(session):
+            value = {
+                **session,
+                "history": [
+                    {k: v for k, v in item.items() if k != "provider_blocks"}
+                    for item in session["history"]
+                ],
+            }
+            return redact_artifact(value, secret_env_names=self.secret_env_names)
+
+        if method == "host.info":
+            return {
+                "protocol": "pico-host-v1",
+                "instance_id": self.manager.instance_id,
+                "workspace": str(self.store.root),
+                "status": "stopping"
+                if not self.manager.accepting
+                else "blocked"
+                if self.manager.blocked
+                else "ready",
+            }
+        if method == "host.stop":
+            self.manager.accepting = False
+            self.stopping.set()
+            return {"status": "stopping"}
+        if method == "sessions.create":
+            config, protocol = freeze_options(self.store.root, params.get("config"))
+            if self.test_script is not None:
+                protocol = "fake"
+            self.secret_env_names.update(config["secret_env_names"])
+            session = {
+                "id": identity("session"),
+                "format": "native-v1",
+                "provider_protocol": protocol,
+                "workspace_root": str(self.store.root),
+                "created_at": now(),
+                "history": [],
+                "memory": default_memory_state(),
+                "config": config,
+            }
+            self.store.save_session(session)
+            return public_session(session)
+        if method == "sessions.list":
+            return [
+                {
+                    "id": s["id"],
+                    "created_at": s["created_at"],
+                    "provider_protocol": s["provider_protocol"],
+                }
+                for s in self.store.list_sessions()
+            ]
+        if method == "sessions.get":
+            return public_session(self.store.load_session(params["session_id"]))
+        if method == "sessions.reset":
+            return public_session(self.store.reset_session(params["session_id"]))
+        if method == "runs.start":
+            if not self.manager.accepting or self.manager.blocked:
+                raise ApplicationError(
+                    "workspace_blocked", "Workspace is not accepting new execution"
+                )
+            session = self.store.load_session(params["session_id"])
+            config, protocol = freeze_options(
+                self.store.root,
+                {**session.get("config", {}), **params.get("config", {})},
+            )
+            if self.test_script is not None:
+                protocol = "fake"
+            if protocol != session["provider_protocol"]:
+                raise ApplicationError(
+                    "unsupported_protocol",
+                    "Create a new session for a different provider protocol",
+                )
+            self.secret_env_names.update(config["secret_env_names"])
+            run = self.store.create_run(
+                session["id"], params["prompt"], config, params["client_request_id"]
+            )
+            if self.test_script is not None and run["status"] == "queued":
+                self.manager.scripts[run["run_id"]] = [
+                    asdict(item) for item in self.test_script
+                ]
+            self.manager.pump()
+            return run
+        if method == "runs.list":
+            return redact_artifact(
+                self.store.list_runs(params.get("limit", 100)),
+                secret_env_names=self.secret_env_names,
+            )
+        if method == "runs.get":
+            return redact_artifact(
+                {
+                    **self.store.get_run(params["run_id"]),
+                    "report": self.store.get_report(params["run_id"]),
+                },
+                secret_env_names=self.secret_env_names,
+            )
+        if method == "runs.cancel":
+            return self.manager.cancel(params["run_id"])
+        if method == "runs.export":
+            return {"path": str(self.store.export_run(params["run_id"]))}
+        if method == "approvals.list":
+            return self.store.list_approvals()
+        if method == "approvals.resolve":
+            return self.store.resolve_approval(
+                params["approval_id"], params["approved"]
+            )
+        if method == "runs.events":
+            after = params.get("after_sequence", 0)
+            deadline = (
+                asyncio.get_running_loop().time() + params.get("wait_ms", 0) / 1000
+            )
+            while True:
+                rows = self.store.events(
+                    params["run_id"], after, params.get("limit", 100)
+                )
+                run = self.store.get_run(params["run_id"])
+                if (
+                    rows
+                    or run["status"] in TERMINAL
+                    or asyncio.get_running_loop().time() >= deadline
+                ):
+                    return {
+                        "events": rows,
+                        "next_sequence": rows[-1]["sequence"] if rows else after,
+                    }
+                # No transaction/lock is held across a long poll. The next DB read cannot lose a notification.
+                await asyncio.sleep(0.05)
