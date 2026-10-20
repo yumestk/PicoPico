@@ -113,6 +113,7 @@ class RunManager:
             bootstrap["script"] = self.scripts.pop(run["run_id"])
         process = await asyncio.create_subprocess_exec(
             sys.executable,
+            *(["-I"] if sys.flags.isolated else []),
             "-m",
             "pico.worker",
             stdin=asyncio.subprocess.PIPE,

@@ -57,11 +57,13 @@ class HostClient:
         directory = self.root / ".pico"
         directory.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(
-            [sys.executable, "-m", "pico.host", "--workspace", str(self.root)],
+            [sys.executable, *(["-I"] if sys.flags.isolated else []),
+             "-m", "pico.host", "--workspace", str(self.root)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            cwd=Path(__file__).resolve().parent.parent,
         )
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:

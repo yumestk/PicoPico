@@ -449,6 +449,9 @@ class ApplicationService:
             self.manager.pump()
             return {
                 "protocol": "pico-host-v1",
+                "backend_version": "0.1.0",
+                "api_version": 1,
+                "capabilities": ["sessions", "runs", "approvals", "events"],
                 "instance_id": self.manager.instance_id,
                 "workspace": str(self.store.root),
                 "status": "stopping"

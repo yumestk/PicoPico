@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "lib": ["ES2022", "DOM"],
+    "module": "CommonJS", "moduleResolution": "Node",
+    "strict": true, "skipLibCheck": true, "esModuleInterop": true,
+    "outDir": "build", "rootDir": ".", "types": ["node"]
+  },
+  "include": ["main", "shared.ts"]
+}

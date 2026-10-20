@@ -170,6 +170,26 @@ Host 异常退出后，原来未结束的运行标记为 interrupted，不自动
 
 阶段计划和验收记录仅保存在本地 `docs/`，不纳入 GitHub 仓库。
 
+### macOS 桌面预览
+
+桌面端目前提供工作区选择和 Host 连接状态，任务操作继续使用 CLI。关闭桌面窗口不会停止工作区 Host。
+
+在 macOS Apple Silicon 上构建内部试用包：
+
+```bash
+uv run python -m scripts.prepare_desktop_runtime
+cd desktop
+nvm use
+npm ci
+npm run typecheck
+npm test
+npm run package
+```
+
+产物为 `desktop/out/Pico-darwin-arm64/Pico.app`，可用 Finder 打开。包内带有经过 SHA256 校验的 CPython；运行不依赖系统 Python、uv、项目虚拟环境或开发服务器。目标仓库使用的 Git、测试框架等开发工具仍需自行安装，模型配置仍读取该仓库的 `.env`。
+
+首版仅支持 macOS arm64 的本地内部试用，尚未签名公证；不包含桌面对话、审批或 Diff 面板。构建下载发生在打包阶段，Python 的来源与校验值见 `desktop/python-runtime.json`。运行 `npm run test:electron` 可验收真实应用窗口及断连后的 Host。
+
 ### 可选配置：right.codes
 
 right.codes 在 Pico 里有两条可选 provider 路径：
