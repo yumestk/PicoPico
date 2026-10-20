@@ -4,11 +4,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:http';
+import { portableApp } from './portable-app';
 
 test('packaged window bootstraps an independent Host and quitting only detaches', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-desktop-'));
   const userData = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-gui-profile-'));
-  const bundle = path.resolve(process.env.PICO_TEST_APP ?? 'out/Pico-darwin-arm64/Pico.app');
+  const portable = await portableApp();
+  const { bundle } = portable;
   const python = path.join(bundle, 'Contents/Resources/backend/python/bin/python3');
   await fs.writeFile(path.join(directory, 'pico.py'), 'raise RuntimeError("Target repository must not be imported")\n');
   let requests = 0;
@@ -81,5 +83,6 @@ test('packaged window bootstraps an independent Host and quitting only detaches'
     await new Promise<void>(resolve => model.close(() => resolve()));
     await fs.rm(directory, { recursive: true, force: true });
     await fs.rm(userData, { recursive: true, force: true });
+    await portable.remove();
   }
 });

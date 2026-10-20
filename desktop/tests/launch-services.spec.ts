@@ -3,9 +3,11 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { portableApp } from './portable-app';
 
 test('moved application opens through macOS LaunchServices', async () => {
-  const bundle = path.resolve(process.env.PICO_TEST_APP ?? 'out/Pico-darwin-arm64/Pico.app');
+  const portable = await portableApp();
+  const { bundle } = portable;
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-launch-services-'));
   let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | undefined;
   let pid: number | undefined;
@@ -37,5 +39,6 @@ test('moved application opens through macOS LaunchServices', async () => {
     }
     await browser?.close().catch(() => {});
     await fs.rm(profile, { recursive: true, force: true });
+    await portable.remove();
   }
 });
