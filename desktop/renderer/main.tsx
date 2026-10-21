@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { compatible, type Approval, type Config, type Configuration, type DesktopAPI, type Message,
-  type RecentWorkspace, type Run, type RunItem, type Session, type SessionItem, type Submission, type ToolCall, type Workspace } from '../shared';
+  type EvidenceLink, type RecentWorkspace, type Run, type RunItem, type Session, type SessionItem, type Submission, type ToolCall, type Workspace } from '../shared';
+import { ReviewPanel } from './review';
 import './style.css';
 
 declare global { interface Window { pico: DesktopAPI } }
@@ -151,6 +152,9 @@ function SessionView({ workspace, sessionId, onDisconnect }: { workspace: Worksp
   const [pending, setPending] = useState<Submission | null>(() => pendingFor(workspace));
   const [sending, setSending] = useState(false);
   const [submissionError, setSubmissionError] = useState('');
+  const [view, setView] = useState<'conversation' | 'review'>('conversation');
+  const [reviewVersion, setReviewVersion] = useState({ run_id: '', sequence: 0 });
+  const [evidence, setEvidence] = useState<EvidenceLink | null>(null);
   const [error, setError] = useState('');
   const alive = useRef(true), sendLock = useRef(false), historyLoading = useRef(false);
   const historyNext = useRef(0), historyTotal = useRef(0), selectedRun = useRef('');
@@ -235,7 +239,10 @@ function SessionView({ workspace, sessionId, onDisconnect }: { workspace: Worksp
     } finally { sendLock.current = false; if (alive.current) setSending(false); }
   }
   const active = runs.some(r => !terminal(r.status));
-  return <div className="conversation"><div className="session-heading"><h2>会话 {sessionId.slice(-8)}</h2>
+  function openEvidence(value: Omit<EvidenceLink, 'nonce'>) { setEvidence({ ...value, nonce: Date.now() }); setView('review'); }
+  return <div className="session-stage"><div className="session-views" aria-label="会话视图"><button aria-pressed={view === 'conversation'} onClick={() => setView('conversation')}>对话与运行</button>
+    <button aria-pressed={view === 'review'} onClick={() => setView('review')}>修改与验证</button></div>
+    <div className="session-layout" data-view={view}><div className="conversation"><div className="session-heading"><h2>会话 {sessionId.slice(-8)}</h2>
     <p>{config?.provider} · {config?.model} · <span>{session?.provider_protocol}</span></p>
     <details><summary>模型连接</summary><p>{config?.endpoint}</p><p>{config?.api_key_configured ? '密钥已配置' : config?.provider === 'ollama' ? '本地模型无需 API 密钥' : '未配置密钥。如服务需要认证，请在工作区 .env 配置对应 PICO_*_API_KEY，然后刷新连接。'}</p></details></div>
     {error && <p role="alert" className="error">{error}</p>}
@@ -247,21 +254,25 @@ function SessionView({ workspace, sessionId, onDisconnect }: { workspace: Worksp
         {!runId && <option value="">尚无运行</option>}{runs.map(r => <option key={r.run_id} value={r.run_id}>{r.run_id.slice(-8)} · {statusText[r.status] ?? r.status}</option>)}</select>
         {runCursor && <button disabled={runs.length >= 200} onClick={() => void moreRuns()}>更多运行</button>}</div>
         {runId && <RunPanel key={runId} workspace={workspace} runId={runId} messages={messages} onDisconnect={onDisconnect}
-          onState={state => setRuns(old => old.some(r => r.run_id === state.run_id) ? old.map(r => r.run_id === state.run_id ? { ...r, status: state.status } : r) : [state, ...old])} />}</section></div>
+          onEvidence={openEvidence} onState={state => {
+            setRuns(old => old.some(r => r.run_id === state.run_id) ? old.map(r => r.run_id === state.run_id ? { ...r, status: state.status } : r) : [state, ...old]);
+            setReviewVersion(old => old.run_id === state.run_id && old.sequence === state.last_sequence ? old : { run_id: state.run_id, sequence: state.last_sequence });
+          }} />}</section></div>
     <form className="composer" onSubmit={e => { e.preventDefault(); void submit(); }}>
       {submissionError && <p role="alert" className="error">{submissionError}</p>}
       <label htmlFor="prompt">{active ? '继续发送会排队，由 Host 顺序执行' : '发送任务'}</label>
       <textarea id="prompt" value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="描述你想完成的事…" disabled={sending || !!pending}
-        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) { e.preventDefault(); void submit(); } }} />
+        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) { e.preventDefault(); void submit(); } }} />
       <div className="composer-actions"><label>本次审批<select aria-label="本次审批模式" value={approval} onChange={e => setApproval(e.target.value)} disabled={sending || !!pending}>
         <option value="ask">每次询问</option><option value="never">禁止写入</option><option value="auto">自动批准</option></select></label>
         {pending ? <button type="button" disabled={sending || pending.session_id !== sessionId} onClick={() => void submit(true)}>{sending ? '正在确认…' : '重试确认同一次发送'}</button>
           : <button className="primary" type="submit" disabled={sending || !prompt.trim()}>{sending ? '发送中…' : active ? '加入队列' : '发送任务'}</button>}</div>
       {pending && <p className="notice">会话 {pending.session_id.slice(-8)} 的发送结果待确认，请在该会话重试确认。将复用原请求 ID；原任务可能已经受理。</p>}
-    </form></div>;
+    </form></div>{runId ? <ReviewPanel key={runId} workspace={workspace} runId={runId} revision={reviewVersion.run_id === runId ? reviewVersion.sequence : 0} link={evidence} />
+      : <aside className="review-pane"><h2>修改与验证</h2><p className="muted">选择运行后查看冻结差异和验证证据。</p></aside>}</div></div>;
 }
 
-function RunPanel({ workspace, runId, messages, onDisconnect, onState }: { workspace: Workspace; runId: string; messages: Message[]; onDisconnect: () => void; onState: (run: Run) => void }) {
+function RunPanel({ workspace, runId, messages, onDisconnect, onState, onEvidence }: { workspace: Workspace; runId: string; messages: Message[]; onDisconnect: () => void; onState: (run: Run) => void; onEvidence: (link: Omit<EvidenceLink, 'nonce'>) => void }) {
   const [run, setRun] = useState<Run | null>(null);
   const [calls, setCalls] = useState<ToolCall[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
@@ -330,7 +341,9 @@ function RunPanel({ workspace, runId, messages, onDisconnect, onState }: { works
       <p>这是操作范围，不是精确写入预览。</p><p>有效至 {new Date(a.expires_at).toLocaleString()}</p>
       <div className="actions"><button className="primary" disabled={!!busy} onClick={() => void act(a.id, true)}>批准</button><button disabled={!!busy} onClick={() => void act(a.id, false)}>拒绝</button>{busy === a.id && <span>等待 Host 确认…</span>}</div></div>)}
     {calls.map(c => <details className="tool-card" key={c.call_ref ?? c.call_id} data-call-id={c.call_ref ?? c.call_id}><summary><strong>{c.name}</strong><span>{c.result?.status ?? c.phase}</span></summary>
-      <pre>{c.details_truncated ? c.preview : pretty({ args: c.args, result: c.result })}</pre>{c.details_truncated && <p>工具详情已截断，可用 CLI 导出完整有界执行记录。</p>}</details>)}
+      <pre>{c.details_truncated ? c.preview : pretty({ args: c.args, result: c.result })}</pre>{c.details_truncated && <p>工具详情已截断，可用 CLI 导出完整有界执行记录。</p>}
+      <div className="evidence-links">{c.result?.metadata?.affected_paths?.slice(0, 20).map(path => <button key={path} onClick={() => onEvidence({ run_id: runId, path })}>查看文件 {path}</button>)}
+        {c.name === 'run_shell' && c.result?.data?.purpose === 'verification' && <button onClick={() => onEvidence({ run_id: runId, call_id: c.call_id })}>查看检查记录</button>}</div></details>)}
     {hasMore && <button disabled={toolPages >= 4} onClick={() => { pages.current++; setToolPages(pages.current); void refresh.current(); }}>更多工具记录</button>}
     {run?.final_answer && !messages.some(m => m.role === 'assistant' && m.content === run.final_answer) && <article className="message assistant"><small>本次运行结果</small><pre>{run.final_answer}</pre></article>}
   </div>;

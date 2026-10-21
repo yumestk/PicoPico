@@ -31,3 +31,35 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height:
 .error, .notice { padding: 10px 14px; margin: 8px 14px; border-radius: 7px; font-size: 12px; overflow-wrap: anywhere; } .error { color: #84372f; background: #f7eae5; } .notice { color: #755a22; background: #fff0d0; } .muted { font-size: 12px; color: #586454; }
 footer { display: flex; justify-content: space-between; border-top: 1px solid #dfe4da; padding: 8px 22px; color: #586454; font-size: 10px; }
 @media (max-width: 920px) { .workspaces { width: 125px; padding: 18px 10px; } .sessions { width: 170px; } header { padding: 12px; } .header-actions { max-width: 200px; } .session-heading, .conversation-scroll, .composer { padding-left: 14px; padding-right: 14px; } }
+.session-stage { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.session-layout { flex: 1; display: flex; min-width: 0; min-height: 0; }
+.session-views { display: none; }
+.review-pane { width: 36%; min-width: 300px; max-width: 470px; border-left: 1px solid #dfe4da; background: #f0f2eb; padding: 14px; min-height: 0; overflow: hidden; }
+.review-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 10px; }
+.review-heading h2 { outline-offset: 3px; } .review-scroll { overflow-y: auto; min-height: 0; flex: 1; }
+.review-pane p, .review-pane small { line-height: 1.7; } .review-pane .badge { display: inline-block; margin: 4px 0; }
+.review-pane .notice, .review-pane .error { margin: 8px 0; }
+.scope-info { padding: 5px 0; border-bottom: 1px solid #dfe4da; font-size: 11px; overflow-wrap: anywhere; }
+.scope-info pre { max-height: 160px; overflow: auto; } .scope-info summary { font-weight: 500; }
+.frozen-checks, .drift { border: 1px solid #d2daca; background: #fafbf7; border-radius: 8px; padding: 10px; margin: 12px 0; font-size: 12px; }
+.drift .card-heading { flex-wrap: wrap; } .drift h3 { font-size: 12px; } .review-tabs { display: flex; gap: 6px; border-bottom: 1px solid #c9d2c1; padding: 8px 0; }
+.review-tabs button[aria-selected=true], .session-views button[aria-pressed=true] { background: #315b45; color: #fff; border-color: #315b45; }
+.changed-files { list-style: none; margin: 10px 0; padding: 0; display: grid; gap: 5px; }
+.changed-files button, .changed-files li > div { width: 100%; text-align: left; overflow-wrap: anywhere; padding: 9px; }
+.changed-files button[aria-pressed=true] { border-color: #597b5f; background: #e1eadc; }
+.changed-files small { display: block; color: #586454; margin-top: 3px; }
+.pager { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between; font-size: 11px; padding: 9px 0; }
+.pager button { padding: 6px 8px; } .frozen-diff { border-top: 1px solid #d2daca; padding-top: 10px; } .frozen-diff h3 { overflow-wrap: anywhere; }
+.diff-text { white-space: pre; overflow: auto; max-height: 420px; background: #fff; border: 1px solid #d7dfd0; border-radius: 6px; padding: 10px; font-size: 11px; }
+.diff-text .addition { color: #1b5d2f; background: #e7f3e5; } .diff-text .deletion { color: #8a332a; background: #fae9e5; } .diff-text .hunk { color: #27536b; }
+.check-card { background: #fff; border: 1px solid #d7dfd0; border-radius: 7px; padding: 10px; margin: 10px 0; overflow-wrap: anywhere; }
+.check-card.linked { border: 2px solid #597b5f; } .check-card .card-heading { align-items: flex-start; flex-wrap: wrap; } .check-card h3 { font-size: 12px; }
+.check-card pre { max-height: 240px; overflow: auto; font-size: 11px; } .evidence-links { display: flex; gap: 5px; flex-wrap: wrap; }
+.evidence-links button { font-size: 11px; overflow-wrap: anywhere; text-align: left; max-width: 100%; }
+@media (min-width: 1101px) { .sessions { width: 165px; } .workspaces { width: 140px; } .conversation-scroll, .composer, .session-heading { padding-left: 16px; padding-right: 16px; } }
+@media (max-width: 1100px) {
+  .session-views { display: flex; gap: 6px; padding: 10px 14px; border-bottom: 1px solid #dfe4da; }
+  .session-layout[data-view=conversation] > .review-pane, .session-layout[data-view=review] > .conversation { display: none; }
+  .review-pane { flex: 1; width: auto; max-width: none; min-width: 0; border-left: 0; }
+}
+@media (max-width: 760px) { .workspaces { width: 100px; } .sessions { width: 145px; padding: 10px 8px; } .brand { font-size: 20px; gap: 6px; } .mark { font-size: 26px; } .header-actions { max-width: 160px; } .session-heading { padding: 8px 12px; } }

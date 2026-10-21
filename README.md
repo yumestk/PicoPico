@@ -166,7 +166,7 @@ Host 异常退出后，原来未结束的运行标记为 interrupted，不自动
 
 当前验收平台为 macOS/POSIX。每个根 Run 使用独立 worker，命令监督进程在 worker 退出后清理 shell 进程组；两路输出各保留最多 64 KiB，默认命令超时 20 秒，最大 120 秒。模型可见工具文本另有 4000 字符展示限制。
 
-开发者入口为 `ApplicationService` 和 `HostClient`，执行内核继续使用 `ModelRequest`、`ModelResponse`、`ToolExecutionResult`。模型所需原始回放块保存在私有会话中，展示事件先脱敏再公开。逐 Token 流式输出、Windows 进程管理和桌面审查面板留待后续阶段。
+开发者入口为 `ApplicationService` 和 `HostClient`，执行内核继续使用 `ModelRequest`、`ModelResponse`、`ToolExecutionResult`。模型所需原始回放块保存在私有会话中，展示事件先脱敏再公开。逐 Token 流式输出和 Windows 进程管理留待后续阶段。
 
 阶段计划和验收记录仅保存在本地 `docs/`，不纳入 GitHub 仓库。
 
@@ -196,13 +196,13 @@ npm run package
 
 产物为 `desktop/out/Pico-darwin-arm64/Pico.app`，可用 Finder 打开。包内带有经过 SHA256 校验的 CPython；运行不依赖系统 Python、uv、项目虚拟环境或开发服务器。目标仓库使用的 Git、测试框架等开发工具仍需自行安装，模型配置仍读取该仓库的 `.env`。
 
-首版仅支持 macOS arm64 的本地内部试用，尚未签名公证；桌面 Diff/验证审查面板在后续节点接入，当前可通过 CLI 查看。构建下载发生在打包阶段，Python 的来源与校验值见 `desktop/python-runtime.json`。运行 `npm run test:electron` 可验收真实打包窗口、CLI 交叉控制、回执丢失与退出恢复、跨工作区隔离及版本不兼容路径；模型请求使用本地原生 HTTP fixture，不等同于 live 效果验收。
+首版仅支持 macOS arm64 的本地内部试用，尚未签名公证。桌面“修改与验证”面板提供冻结 Diff、开始前已有修改、验证命令与范围说明；“刷新当前漂移”单独观察当前文件，不覆盖历史。宽窗口并排审查，窄窗口切换对话与审查，工具卡片可跳到相关文件或检查；Diff、文件列表和检查记录均分页读取。构建下载发生在打包阶段，Python 的来源与校验值见 `desktop/python-runtime.json`。运行 `npm run test:electron` 可验收真实打包窗口、CLI 交叉控制、回执丢失与退出恢复、跨工作区隔离、版本不兼容路径，以及脏工作树审查、失败/未知/取消、分页与中文输入法；模型请求使用本地原生 HTTP fixture，不等同于 live 效果验收。
 
 ### 运行差异与数据升级
 
 新运行会在取得执行槽后保存工作树基线，并在结束时保存冻结的文件差异。基线包含运行开始时你已有的修改，比较不以 HEAD 为起点；审查过程不修改 Git index，也不执行 stash/reset。外部编辑与工具可能交错，因此差异表示运行期间观察到的变化。
 
-`pico runs export <run_id>` 除执行记录外，还导出脱敏的 `review.json`、`changes.json`、`diffs.json` 和 `checks.json`。CLI 与桌面共用 Host 查询；桌面审查面板在后续节点接入。敏感文件、二进制、大文件、忽略项与采集失败都有明确范围/缺失提示，不能将没有 Diff 当作没有修改。
+`pico runs export <run_id>` 除执行记录外，还导出脱敏的 `review.json`、`changes.json`、`diffs.json` 和 `checks.json`。CLI 与桌面共用 Host 查询；失败、取消或中断后仍可查看已知差异与检查证据，缺少结束快照时明确标为不完整。敏感文件、二进制、大文件、忽略项与采集失败都有明确范围/缺失提示，不能将没有 Diff 当作没有修改。
 
 ```bash
 uv run pico runs review <run_id>

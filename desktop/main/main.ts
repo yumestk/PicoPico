@@ -91,6 +91,9 @@ const methods: Record<string, string[]> = {
   'sessions.create': ['config'], 'runs.list': ['cursor', 'limit', 'session_id'], 'runs.get': ['run_id'],
   'runs.start': ['session_id', 'prompt', 'client_request_id', 'config'], 'runs.cancel': ['run_id'],
   'runs.tool_calls': ['run_id', 'cursor', 'limit'], 'approvals.list': [], 'approvals.resolve': ['approval_id', 'approved'],
+  'runs.review': ['run_id'], 'runs.changes': ['run_id', 'scope', 'after_file', 'limit'],
+  'runs.diff': ['run_id', 'file_id', 'after_character', 'max_characters'],
+  'runs.checks': ['run_id', 'cursor', 'limit'], 'runs.review_refresh': ['run_id'],
 };
 
 if (!app.requestSingleInstanceLock()) app.quit();

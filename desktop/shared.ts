@@ -13,7 +13,16 @@ export interface Run extends RunItem { last_sequence: number; final_answer: stri
 export interface Message { message_id: string; message_index: number; role: string; content: string; content_truncated: boolean; tool_calls?: { id: string; name: string }[]; tool_call_count?: number }
 export interface Session extends SessionItem { config: Config; history: Message[]; next_message: number; history_count: number; history_revision?: string }
 export interface Config { provider?: string; model?: string; approval?: string }
-export interface ToolCall { run_id: string; call_id: string; call_ref?: string; name: string; phase: string; args?: unknown; result?: { status: string; error_code: string; data?: unknown }; details_truncated?: boolean; preview?: string }
+export interface ToolCall { run_id: string; call_id: string; call_ref?: string; name: string; phase: string; args?: unknown; result?: { status: string; error_code: string; data?: { purpose?: string }; metadata?: { affected_paths?: string[] } }; details_truncated?: boolean; preview?: string }
+export interface CheckSummary { status: string; counts: Record<string, number>; total: number; coverage_assessed: boolean; scope: string }
+export interface Scope { captured_at?: string; complete: boolean; notes: string[]; file_count?: number; content_omissions?: Record<string, number> }
+export interface Review { state: string; reason?: string; parent_run_id?: string; baseline: Scope | null; end: Scope | null; change_count: number; initial_change_count: number; checks: CheckSummary }
+export interface Change { path: string; id?: string; kind?: string; reason?: string; diff_available?: boolean; index?: string; worktree?: string }
+export interface Changes { files: Change[]; next_file: number; total: number }
+export interface Diff { available: boolean; reason: string; text: string; redacted?: boolean; next_character: number; has_more: boolean }
+export interface Check { run_id: string; call_id: string; call_ref?: string; command: string; command_truncated: boolean; cwd: string | null; started_at: string | null; finished_at: string | null; exit_code: number | null; timed_out: boolean; cancelled: boolean; status: string; command_outcome: string; version_status: string; stdout: string; stderr: string; stdout_truncated: boolean; stderr_truncated: boolean; before_scope: Scope | null; after_scope: Scope | null; details_truncated?: boolean; preview?: string }
+export interface Drift { state: string; reason?: string; current_scope?: Scope; version_status?: string; checks?: CheckSummary }
+export interface EvidenceLink { run_id: string; path?: string; call_id?: string; nonce: number }
 export interface Approval { id: string; run_id: string; call_id: string; name: string; args: unknown; status: string; expires_at: string; scope: { cwd: string; path: string }; args_truncated: boolean }
 export interface RunEvent { sequence: number; event_id: string; event: string; name?: string }
 export interface Activity { subscription_id: string; handle: string; run_id: string; events: RunEvent[]; next_sequence: number; error?: string }
@@ -28,6 +37,11 @@ export interface HostMethods {
   'runs.start': { params: Submission; result: Run };
   'runs.cancel': { params: { run_id: string }; result: Run };
   'runs.tool_calls': { params: { run_id: string; cursor: string; limit: number }; result: Page<ToolCall> };
+  'runs.review': { params: { run_id: string }; result: Review };
+  'runs.changes': { params: { run_id: string; scope: 'initial' | 'run'; after_file: number; limit: number }; result: Changes };
+  'runs.diff': { params: { run_id: string; file_id: string; after_character: number; max_characters: number }; result: Diff };
+  'runs.checks': { params: { run_id: string; cursor: string; limit: number }; result: Page<Check> };
+  'runs.review_refresh': { params: { run_id: string }; result: Drift };
   'approvals.list': { params: Record<string, never>; result: Approval[] };
   'approvals.resolve': { params: { approval_id: string; approved: boolean }; result: Approval };
 }
