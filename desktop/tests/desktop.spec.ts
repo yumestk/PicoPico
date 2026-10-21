@@ -53,7 +53,7 @@ test('packaged window bootstraps an independent Host and quitting only detaches'
     await expect(window.getByTestId('workspace-path')).toHaveText(await fs.realpath(directory));
     await expect(window.getByText('pico-host-v1', { exact: true })).toBeVisible();
     expect(await window.evaluate(() => ({ node: typeof (globalThis as unknown as { require?: unknown }).require,
-      keys: Object.keys(window.pico).sort() }))).toEqual({ node: 'undefined', keys: ['chooseWorkspace', 'refreshWorkspace'] });
+      keys: Object.keys(window.pico).sort() }))).toEqual({ node: 'undefined', keys: ['chooseWorkspace', 'onActivity', 'openRecent', 'recentWorkspaces', 'refreshWorkspace', 'rememberSelection', 'request', 'restoreWorkspace', 'stopWatch', 'upgradeHost', 'watchRun'] });
     await window.screenshot({ path: 'test-results/connected.png' });
     const run = JSON.parse(query('import json,sys;from pico.host_client import HostClient;c=HostClient(sys.argv[1]);s=c.call("sessions.create",{"config":{"provider":"anthropic","base_url":sys.argv[2],"approval":"auto"}});print(json.dumps(c.call("runs.start",{"session_id":s["id"],"prompt":"Run the requested shell once","client_request_id":"desktop-smoke"})))', `http://127.0.0.1:${address.port}`));
     await expect.poll(async () => fs.readFile(path.join(directory, 'started'), 'utf8').catch(() => '')).toBe('ready');

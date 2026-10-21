@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sqlite3
+from contextlib import suppress
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -96,9 +97,21 @@ class Host:
                             "workspace_mismatch",
                             "Connection targets a different workspace",
                         )
-                    result = await self.app.dispatch(
-                        value.get("method"), value.get("params")
-                    )
+                    if value.get("method") == "runs.events":
+                        pending = asyncio.create_task(self.app.dispatch(value["method"], value.get("params")))
+                        try:
+                            while not pending.done():
+                                if reader.at_eof():
+                                    return  # A detached subscriber must not occupy a Host connection until timeout.
+                                await asyncio.wait({pending}, timeout=0.05)
+                            result = pending.result()
+                        finally:
+                            if not pending.done():
+                                pending.cancel()
+                                with suppress(asyncio.CancelledError):
+                                    await pending
+                    else:
+                        result = await self.app.dispatch(value.get("method"), value.get("params"))
                     response = {"id": request_id, "result": result}
                 except ApplicationError as exc:
                     response = {

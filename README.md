@@ -166,13 +166,21 @@ Host 异常退出后，原来未结束的运行标记为 interrupted，不自动
 
 当前验收平台为 macOS/POSIX。每个根 Run 使用独立 worker，命令监督进程在 worker 退出后清理 shell 进程组；两路输出各保留最多 64 KiB，默认命令超时 20 秒，最大 120 秒。模型可见工具文本另有 4000 字符展示限制。
 
-开发者入口为 `ApplicationService` 和 `HostClient`，执行内核继续使用 `ModelRequest`、`ModelResponse`、`ToolExecutionResult`。模型所需原始回放块保存在私有会话中，展示事件先脱敏再公开。逐 Token 流式输出、Windows 进程管理和桌面 UI 留待后续阶段。
+开发者入口为 `ApplicationService` 和 `HostClient`，执行内核继续使用 `ModelRequest`、`ModelResponse`、`ToolExecutionResult`。模型所需原始回放块保存在私有会话中，展示事件先脱敏再公开。逐 Token 流式输出、Windows 进程管理和桌面审查面板留待后续阶段。
 
 阶段计划和验收记录仅保存在本地 `docs/`，不纳入 GitHub 仓库。
 
 ### macOS 桌面预览
 
-桌面端目前提供工作区选择和 Host 连接状态，任务操作继续使用 CLI。关闭桌面窗口不会停止工作区 Host。
+桌面端可选择/恢复最近工作区，创建会话、提交任务、查看工具活动、批准或拒绝操作并取消运行。CLI 与桌面操作同一个 Host/Run；关闭窗口和退出应用都只断连，后台任务继续，重开后从工作区数据库恢复。
+
+新会话设置可选择 provider、模型及审批模式；已存在会话显示其冻结配置，改变原生协议时应新建会话。本次审批模式只影响新提交的任务。连接说明显示脱敏 endpoint 与密钥是否配置，密钥仍在项目 `.env`，桌面不提供密钥编辑。
+
+发送前持久化请求 ID 和待确认请求，快速重复点击只有一个任务；回执丢失时重开应用可“重试确认同一次发送”，复用原 ID。明确拒绝受理的配置/阻塞错误允许修正后重新发送；传输结果未知时不会自动创建新任务。其他非终态任务存在时，新输入明确加入 Host 队列。审批提交后等待 Host 确认，取消也要等待真实终态；中断或结果未知会提示先检查工作区。
+
+每个可见 Run 只有一条可中止的事件订阅，切换工作区、运行、重载或关闭窗口时断开；迟到响应按工作区/组件生命周期隔离。历史和工具卡片使用稳定身份去重、按需分页，模型输出作为纯文本显示。最近工作区/选择保存在 Electron userData 的小 JSON，待确认发送保存在该应用的本地存储；运行、审批和历史事实仍以 SQLite 为准。
+
+桌面任务控制需要 Host API 4。支持 `idle_upgrade` 的 Host 可以“升级空闲 Host”，其空闲检查与停止接收任务之间没有异步间隙；有执行、排队或范围观察时拒绝升级。API 1–3 缺少这一原子保护，桌面只提示手动路径：先完成任务，再显式 `pico --cwd <workspace> host stop`，然后刷新连接；不会为了升级而停止活动任务。断连会显示状态并重连，blocked 和配置错误分别展示。
 
 在 macOS Apple Silicon 上构建内部试用包：
 
@@ -188,7 +196,7 @@ npm run package
 
 产物为 `desktop/out/Pico-darwin-arm64/Pico.app`，可用 Finder 打开。包内带有经过 SHA256 校验的 CPython；运行不依赖系统 Python、uv、项目虚拟环境或开发服务器。目标仓库使用的 Git、测试框架等开发工具仍需自行安装，模型配置仍读取该仓库的 `.env`。
 
-首版仅支持 macOS arm64 的本地内部试用，尚未签名公证；不包含桌面对话、审批或 Diff 面板。构建下载发生在打包阶段，Python 的来源与校验值见 `desktop/python-runtime.json`。运行 `npm run test:electron` 可验收真实应用窗口及断连后的 Host。
+首版仅支持 macOS arm64 的本地内部试用，尚未签名公证；桌面 Diff/验证审查面板在后续节点接入，当前可通过 CLI 查看。构建下载发生在打包阶段，Python 的来源与校验值见 `desktop/python-runtime.json`。运行 `npm run test:electron` 可验收真实打包窗口、CLI 交叉控制、回执丢失与退出恢复、跨工作区隔离及版本不兼容路径；模型请求使用本地原生 HTTP fixture，不等同于 live 效果验收。
 
 ### 运行差异与数据升级
 
@@ -211,6 +219,8 @@ uv run pico configuration
 `run_shell` 可声明 `purpose: verification`，默认仍为 `general`，审批、预算与执行路径不变。检查只按真实退出码、超时、取消及中断事实归类；`echo ok` 成功只证明该命令成功，不代表测试覆盖。检查前后及 Run 结束时比较有界审查范围的内容指纹，后续修改使成功证据变为 `stale`，缺失/不完整证据为 `inconclusive`。历史结果保持冻结，`review_refresh` 只返回当前树的漂移观察，执行中返回 `busy`。此范围遵循前述忽略与大小限制，不声明验证整个仓库。
 
 Host API v3 增加 `configuration.get`、`runs.tool_calls`、`runs.checks`、`runs.review_refresh`。列表显式传 `cursor: ""` 开始分页，返回 `items/next_cursor`，后续传回不透明游标；会话和 Run 按稳定创建顺序分页，不被后续更新或新记录打乱。Run 列表支持 `session_id`。工具/检查分页同样使用游标，单页限制 256 KiB、最多 100 条，检查输出每流显示最多 8192 字符并标记截断；完整的执行输出仍受原有 64 KiB/流限制。命令显示也有 8192 字符上限与截断标记，私有记录保留原始命令。旧客户端未传列表游标时仍取得原有列表形状；新 CLI 使用分页。配置查询只返回 provider/model/去掉凭据及查询参数的 endpoint/密钥是否已配置，不返回密钥或环境变量。
+
+API v4 的 `sessions.get` 为展示视图：消息有稳定 `message_id/message_index`，reset 后换历史身份，不返回原生 replay blocks、工具大参数或私有结构化结果。内容先脱敏再按 16384 字符截断，历史页最多 256 KiB；完整私有记录仍在数据库，工具结构化详情用 `runs.tool_calls`。`configuration.get` 可按 session_id 查询对应会话。配置视图、公开 Session/Run 及报告里的 endpoint 均移除 URL 凭据和查询参数；真实执行仍使用私有冻结配置。新增 `host.stop_if_idle` 只供受控空闲升级，不提供通用桌面停止 Host/文件/命令桥。
 
 首次使用新 Host 时，SQLite schema v1 会备份到 `.pico/backups/` 后事务升级到 v2；保留会话、审批、调用与事件。旧运行没有采集过的差异显示不可用，不从当前文件重建。旧 Host 不会被桌面自动强制重启；有活动任务时先完成或显式取消，再停止旧 Host，下一次连接启动新版。升级后的数据库供新版本使用，旧版本不能直接读取 v2。
 

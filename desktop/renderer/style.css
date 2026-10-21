@@ -1,33 +1,33 @@
-:root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #28312f; background: #f7f7f3; font-synthesis: none; }
-* { box-sizing: border-box; }
-body { margin: 0; }
-button { font: inherit; cursor: pointer; border: 1px solid #d5ddd6; background: #fff; border-radius: 8px; padding: 10px 14px; color: #234937; }
-button:focus-visible { outline: 3px solid #5b9479; outline-offset: 3px; }
-button:disabled { opacity: .55; cursor: wait; }
-.shell { display: flex; min-height: 100vh; }
-aside { width: 220px; padding: 34px 20px; border-right: 1px solid #e0e5dc; background: #eeefe8; display: flex; flex-direction: column; }
+:root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #28312f; background: #f7f7f3; font-synthesis: none; font-size: 13px; }
+* { box-sizing: border-box; } body { margin: 0; } button, input, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; border: 1px solid #d5ddd6; background: #fff; border-radius: 7px; padding: 8px 11px; color: #234937; }
+button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid #5b9479; outline-offset: 2px; }
+button:disabled { opacity: .55; cursor: default; } input, textarea, select { border: 1px solid #c9d2c9; border-radius: 6px; padding: 8px; background: white; min-width: 0; }
+textarea { width: 100%; min-height: 75px; max-height: 180px; resize: vertical; line-height: 1.6; } select { max-width: 100%; }
+label { display: grid; gap: 6px; margin: 10px 0; font-size: 12px; } pre, code { font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; } code { overflow-wrap: anywhere; } p { line-height: 1.7; overflow-wrap: anywhere; } h2, h3 { font-size: 14px; margin: 8px 0; } h1 { font-size: 30px; font-weight: 550; }
+.shell { display: flex; height: 100vh; overflow: hidden; } aside { display: flex; flex-direction: column; flex-shrink: 0; min-height: 0; }
+.workspaces { width: 160px; padding: 24px 14px; background: #eeefe8; border-right: 1px solid #dfe4da; overflow-y: auto; }
 .brand { display: flex; gap: 10px; align-items: center; font-size: 24px; font-weight: 650; letter-spacing: -1px; }
 .mark { background: #315b45; color: #f7f7f3; border-radius: 9px; padding: 0 10px 4px; font-family: Georgia, serif; font-size: 32px; }
-.caption { margin-top: 44px; color: #657166; font-size: 12px; }
-.workspace-button { background: transparent; text-align: left; }
-.selected { margin-top: 20px; padding: 10px; overflow-wrap: anywhere; font-size: 13px; }
-.dot { display: inline-block; width: 7px; height: 7px; background: #4e7d61; border-radius: 50%; margin-right: 8px; }
-.sidebar-foot { margin-top: auto; padding-top: 40px; font-size: 12px; line-height: 1.8; color: #748074; }
-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-header { display: flex; justify-content: space-between; padding: 30px 38px; font-size: 13px; border-bottom: 1px solid #e5e7df; }
-.local { color: #627364; font-size: 11px; }
-section { padding: 65px 48px 38px; max-width: 880px; flex: 1; }
-.eyebrow { font-size: 10px; letter-spacing: 2px; color: #7e8876; }
-h1 { font-size: 34px; letter-spacing: -1px; margin: 17px 0; font-weight: 550; }
-.intro { color: #647064; font-size: 14px; line-height: 1.9; margin-bottom: 30px; }
-.primary { background: #315b45; color: white; padding: 13px 20px; border-color: #315b45; }
-.connection { background: #fff; border: 1px solid #dfe4da; padding: 22px; border-radius: 12px; }
-.card-heading { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
-.badge { background: #edf3ec; color: #34553f; font: 11px ui-monospace, monospace; border-radius: 12px; padding: 5px 10px; }
-dl { display: grid; grid-template-columns: 82px minmax(0,1fr); gap: 15px; margin: 25px 0; font-size: 12px; }
-dt { color: #718074; } dd { margin: 0; overflow-wrap: anywhere; line-height: 1.5; font-family: ui-monospace, monospace; }
-.note { color: #758072; font-size: 11px; line-height: 1.8; margin-top: 28px; }
-.error { color: #963d37; background: #f7eae5; padding: 15px; overflow-wrap: anywhere; font-size: 13px; border-radius: 8px; }
-footer { display: flex; justify-content: space-between; border-top: 1px solid #e5e7df; margin: 0 38px; padding: 20px 0; color: #798674; letter-spacing: 2px; font-size: 10px; }
-footer span { letter-spacing: 0; }
-@media (max-width: 800px) { aside { width: 170px; padding: 30px 16px; } section { padding: 45px 28px; } h1 { font-size: 29px; } }
+.caption { margin-top: 30px; color: #586454; font-size: 11px; } nav { display: grid; gap: 5px; margin: 14px 0; }
+nav button { text-align: left; background: transparent; overflow-wrap: anywhere; } nav button.selected, nav button[aria-current=true] { background: #dce6da; border-color: #a9beaa; }
+nav small { display: block; color: #586454; margin-top: 5px; } .sidebar-foot { margin-top: auto; padding-top: 40px; font-size: 11px; line-height: 1.8; color: #586454; }
+main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; } header { display: flex; justify-content: space-between; gap: 16px; padding: 18px 22px; border-bottom: 1px solid #dfe4da; flex-shrink: 0; align-items: center; }
+.path { display: block; margin-top: 6px; font-size: 11px; overflow-wrap: anywhere; color: #586454; } .header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; flex-shrink: 0; }
+.badge { background: #edf3ec; color: #34553f; font-size: 11px; border-radius: 12px; padding: 5px 9px; white-space: nowrap; } .badge.failed, .badge.interrupted { color: #963d37; background: #f7eae5; }
+.badge.waiting_approval { color: #755a22; background: #fff0d0; } .primary { background: #315b45; color: white; border-color: #315b45; }
+.welcome { padding: 60px 40px; flex: 1; } .eyebrow { font-size: 10px; letter-spacing: 2px; color: #586454; }
+.workspace-body { display: flex; flex: 1; min-height: 0; overflow: hidden; } .sessions { width: 205px; padding: 14px 12px; border-right: 1px solid #dfe4da; overflow-y: auto; }
+.sessions .card-heading { flex-wrap: wrap; } .sessions details { margin: 12px 0; } details summary { cursor: pointer; padding: 6px 0; } .sessions select, .sessions input { width: 100%; }
+.conversation { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; } .session-heading { padding: 12px 22px; border-bottom: 1px solid #e1e6dc; } .session-heading p { margin: 5px 0; font-size: 12px; }
+.conversation-scroll { overflow-y: auto; flex: 1; min-height: 0; padding: 12px 22px; } .message { margin: 12px 0; padding: 12px 14px; background: white; border: 1px solid #e0e5da; border-radius: 10px; }
+.message.user { background: #edf1e7; } .message small { color: #586454; } .message pre { font-family: inherit; font-size: 13px; }
+.runs { border-top: 1px solid #dfe4da; margin-top: 18px; padding-top: 10px; } .card-heading { display: flex; gap: 10px; justify-content: space-between; align-items: center; }
+.runs > .card-heading { flex-wrap: wrap; } .run-panel { padding: 12px 0; } .run-panel > .card-heading { flex-wrap: wrap; } .tool-card { border: 1px solid #dfe4da; background: #fff; border-radius: 7px; margin: 8px 0; padding: 6px 12px; }
+.tool-card summary span { float: right; color: #586454; font-size: 11px; } .tool-card pre, .approval pre { max-height: 280px; overflow: auto; }
+.approval { background: #fff9e9; border: 1px solid #d9c692; padding: 14px; border-radius: 8px; margin: 12px 0; } .actions { display: flex; align-items: center; gap: 10px; }
+.composer { padding: 10px 22px 14px; border-top: 1px solid #dfe4da; background: #f7f7f3; } .composer-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; } .composer-actions label { display: flex; align-items: center; }
+.error, .notice { padding: 10px 14px; margin: 8px 14px; border-radius: 7px; font-size: 12px; overflow-wrap: anywhere; } .error { color: #84372f; background: #f7eae5; } .notice { color: #755a22; background: #fff0d0; } .muted { font-size: 12px; color: #586454; }
+footer { display: flex; justify-content: space-between; border-top: 1px solid #dfe4da; padding: 8px 22px; color: #586454; font-size: 10px; }
+@media (max-width: 920px) { .workspaces { width: 125px; padding: 18px 10px; } .sessions { width: 170px; } header { padding: 12px; } .header-actions { max-width: 200px; } .session-heading, .conversation-scroll, .composer { padding-left: 14px; padding-right: 14px; } }

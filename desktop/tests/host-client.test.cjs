@@ -42,3 +42,20 @@ test('mismatched IDs, workspace, oversized responses and disconnects fail closed
     });
   }
 });
+
+test('aborting a long poll closes its socket while another control call still works', async t => {
+  let closed;
+  const peerClosed = new Promise(resolve => { closed = resolve; });
+  const socket = await endpoint(t, (connection, request) => {
+    if (request.method === 'runs.events') connection.on('end', () => { connection.end(); closed(); });
+    else connection.end(JSON.stringify({ id: request.id, result: { status: 'cancelling' } }) + '\n');
+  });
+  const controller = new AbortController();
+  const pending = callHost(socket, '/workspace', 'runs.events', {}, 15000, controller.signal);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(await callHost(socket, '/workspace', 'runs.cancel'), { status: 'cancelling' });
+  controller.abort();
+  await assert.rejects(pending, /cancelled/);
+  await peerClosed;
+  await assert.rejects(callHost(socket, '/workspace', 'runs.events', {}, 15000, controller.signal), /cancelled/);
+});

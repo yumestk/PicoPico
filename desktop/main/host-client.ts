@@ -7,7 +7,7 @@ export const PROTOCOL = 'pico-host-v1';
 
 /** One bounded request per connection, including independent cancellation of reads. */
 export function callHost<T>(socket: string, workspace: string, method: string,
-  params: Record<string, unknown> = {}, timeout = 5000): Promise<T> {
+  params: Record<string, unknown> = {}, timeout = 5000, signal?: AbortSignal): Promise<T> {
   const id = randomUUID();
   const request = Buffer.from(JSON.stringify({ id, protocol: PROTOCOL, workspace, method, params }) + '\n');
   if (request.length > MAX_MESSAGE) return Promise.reject(new Error('Host request exceeds size limit'));
@@ -18,9 +18,13 @@ export function callHost<T>(socket: string, workspace: string, method: string,
     const finish = (error?: Error, result?: T) => {
       if (done) return;
       done = true;
+      signal?.removeEventListener('abort', abort);
       connection.destroy();
       if (error) reject(error); else resolve(result as T);
     };
+    const abort = () => finish(new Error('Host read cancelled'));
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) { abort(); return; }
     connection.setTimeout(timeout, () => finish(new Error('Host request timed out')));
     connection.on('error', error => finish(error));
     connection.on('connect', () => connection.write(request));

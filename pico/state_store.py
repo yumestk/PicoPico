@@ -202,6 +202,7 @@ class StateStore:
             session = self.load_session(session_id)
             session.update(
                 history=[],
+                history_revision=identity("history"),
                 memory=default_memory_state(),
                 checkpoints={},
                 runtime_identity={},
@@ -367,8 +368,10 @@ class StateStore:
             # Each card is bounded independently; aggregate pages stay below the 1 MiB public transport.
             encoded = encode(item)
             if len(encoded.encode()) > 192 * 1024:
-                item = self.redact({"run_id": run_id(value), "call_id": row["call_id"], "name": row["name"],
-                        "phase": row["phase"], "details_truncated": True, "preview": encoded[:8192]})
+                fields = self.redact({"call_id": row["call_id"], "name": row["name"]})
+                item = {"run_id": run_id(value), "call_id": fields["call_id"][:200], "name": fields["name"][:200],
+                        "call_ref": digest(row["call_id"]), "identity_truncated": any(len(v) > 200 for v in fields.values()),
+                        "phase": row["phase"], "details_truncated": True, "preview": encoded[:8192]}
                 encoded = encode(item)
             if page and size + len(encoded.encode()) > 256 * 1024:
                 break

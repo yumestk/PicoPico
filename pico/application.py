@@ -65,6 +65,18 @@ PROVIDER_CHOICES = ("ollama", "openai", "anthropic", "deepseek")
 SECRET_ENV_NAMES_VAR = "PICO_SECRET_ENV_NAMES"
 
 
+def display_endpoint(endpoint):
+    from urllib.parse import urlsplit, urlunsplit
+
+    parsed = urlsplit(endpoint)
+    authority = parsed.hostname or ""
+    if ":" in authority:
+        authority = "[" + authority + "]"
+    if parsed.port:
+        authority += ":" + str(parsed.port)
+    return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
+
+
 def _effective_provider(args):
     # Provider 选择优先级：
     # 1. 用户显式传入 --provider
@@ -370,7 +382,8 @@ class ApplicationService:
         specifications = {
             "host.info": ({}, {}),
             "host.stop": ({}, {}),
-            "configuration.get": ({}, {}),
+            "host.stop_if_idle": ({}, {}),
+            "configuration.get": ({}, {"session_id": str}),
             "sessions.create": ({}, {"config": dict}),
             "sessions.list": ({}, {"limit": int, "cursor": str}),
             "sessions.get": ({"session_id": str}, {"after_message": int, "limit": int}),
@@ -433,6 +446,30 @@ class ApplicationService:
                 )
             return session
 
+        def public_value(value):
+            if "config" in value:
+                config = dict(value["config"])
+                for key in ("base_url", "host"):
+                    if config.get(key):
+                        config[key] = display_endpoint(config[key])
+                value = {**value, "config": config}
+            report = value.get("report")
+            if isinstance(report, dict) and isinstance(report.get("run_state"), dict):
+                value = {**value, "report": {**report, "run_state": public_value(report["run_state"])}}
+            return redact_artifact(value, secret_env_names=self.secret_env_names)
+
+        def resolved_options(overrides=None):
+            try:
+                config, protocol = freeze_options(self.store.root, overrides)
+                for key in ("base_url", "host"):
+                    if config.get(key):
+                        display_endpoint(config[key])
+                return config, protocol
+            except ApplicationError:
+                raise
+            except (ValueError, OSError):
+                raise ApplicationError("configuration_error", "模型配置无效。请检查项目 .env 的提供方、模型、地址及文件格式，再刷新连接。") from None
+
         def public_session(session, after=0, limit=0):
             # Raw replay blocks and old checkpoint snapshots stay private; history is paged for display.
             value = {
@@ -445,27 +482,43 @@ class ApplicationService:
                     "workspace_root",
                     "config",
                     "memory",
+                    "history_revision",
                 ]
                 if key in session
             }
+            history, size = [], 0
+            for index in range(after, min(after + limit, len(session["history"]))):
+                item = redact_artifact(session["history"][index], secret_env_names=self.secret_env_names)
+                content = str(item.get("content", ""))
+                view = {k: item[k] for k in ("role", "name", "call_id", "created_at") if k in item}
+                view.update(message_id=f"{session['id']}:{session.get('history_revision', '')}:{index}", message_index=index,
+                            content=content[:16384], content_truncated=len(content) > 16384)
+                if item.get("tool_calls"):
+                    view["tool_calls"] = [{"id": c["id"], "name": c["name"]} for c in item["tool_calls"][:100]]
+                encoded_size = len(json.dumps(view, ensure_ascii=False).encode())
+                if encoded_size > 192 * 1024:
+                    view = {k: view[k] for k in ("role", "content", "content_truncated", "message_id", "message_index")}
+                    view.update(details_truncated=True, tool_call_count=len(item.get("tool_calls", [])))
+                    encoded_size = len(json.dumps(view, ensure_ascii=False).encode())
+                if history and size + encoded_size > 256 * 1024:
+                    break
+                history.append(view)
+                size += encoded_size
             value.update(
-                history=[
-                    {k: v for k, v in item.items() if k != "provider_blocks"}
-                    for item in session["history"][after : after + limit]
-                ],
-                next_message=min(after + limit, len(session["history"])),
+                history=history,
+                next_message=min(after + len(history), len(session["history"])),
                 history_count=len(session["history"]),
             )
-            return redact_artifact(value, secret_env_names=self.secret_env_names)
+            return public_value(value)
 
         if method == "host.info":
             self.manager.pump()
             return {
                 "protocol": "pico-host-v1",
                 "backend_version": "0.1.0",
-                "api_version": 3,
+                "api_version": 4,
                 "capabilities": ["sessions", "runs", "approvals", "events", "run_reviews",
-                                 "verification_evidence", "query_cursors", "configuration_summary"],
+                                 "verification_evidence", "query_cursors", "configuration_summary", "desktop_control", "idle_upgrade"],
                 "instance_id": self.manager.instance_id,
                 "workspace": str(self.store.root),
                 "status": "stopping"
@@ -474,27 +527,27 @@ class ApplicationService:
                 if self.manager.blocked
                 else "ready",
             }
-        if method == "host.stop":
+        if method in {"host.stop", "host.stop_if_idle"}:
+            if method == "host.stop_if_idle":
+                from .run_manager import execution_idle
+                if self.review_refreshing or not execution_idle(self.store.root) or self.store.connection.execute(
+                    "SELECT 1 FROM runs WHERE status NOT IN ('completed','stopped','failed','cancelled','interrupted') LIMIT 1").fetchone():
+                    raise ApplicationError("workspace_busy", "Active or queued tasks must finish before upgrading")
+            # No await between the idle check and rejecting all subsequent starts.
             self.manager.accepting = False
             self.stopping.set()
             return {"status": "stopping"}
         if method == "configuration.get":
-            from urllib.parse import urlsplit, urlunsplit
-            config, _ = freeze_options(self.store.root)
+            overrides = conversation(params["session_id"])["config"] if "session_id" in params else None
+            config, _ = resolved_options(overrides)
             model = _build_model_client(SimpleNamespace(**config))
             endpoint = getattr(model, "base_url", getattr(model, "host", ""))
-            parsed = urlsplit(endpoint)
             # Credentials and query tokens in custom URLs are never configuration display data.
-            authority = (parsed.hostname or "")
-            if ":" in authority:
-                authority = "[" + authority + "]"
-            if parsed.port:
-                authority += ":" + str(parsed.port)
             return self.store.redact({"provider": config["provider"], "model": config["model"],
-                                      "endpoint": urlunsplit((parsed.scheme, authority, parsed.path, "", "")),
+                                      "endpoint": display_endpoint(endpoint),
                                       "api_key_configured": bool(getattr(model, "api_key", ""))})
         if method == "sessions.create":
-            config, protocol = freeze_options(self.store.root, params.get("config"))
+            config, protocol = resolved_options(params.get("config"))
             if self.test_script is not None:
                 protocol = "fake"
             self.secret_env_names.update(config["secret_env_names"])
@@ -551,10 +604,7 @@ class ApplicationService:
                     "session_too_large",
                     "Start a new session; original history remains intact",
                 )
-            config, protocol = freeze_options(
-                self.store.root,
-                {**session.get("config", {}), **params.get("config", {})},
-            )
+            config, protocol = resolved_options({**session.get("config", {}), **params.get("config", {})})
             if self.test_script is not None:
                 protocol = "fake"
             if protocol != session["provider_protocol"]:
@@ -571,24 +621,20 @@ class ApplicationService:
                     asdict(item) for item in self.test_script
                 ]
             self.manager.pump()
-            return run
+            return public_value(run)
         if method == "runs.list":
             if "cursor" in params or "session_id" in params:
                 return self.store.list_page("runs", params.get("cursor", ""), params.get("limit", 100), params.get("session_id", ""))
-            return redact_artifact(
-                self.store.list_runs(params.get("limit", 100)),
-                secret_env_names=self.secret_env_names,
-            )
+            return [public_value(run) for run in self.store.list_runs(params.get("limit", 100))]
         if method == "runs.get":
-            return redact_artifact(
+            return public_value(
                 {
                     **self.store.get_run(params["run_id"]),
                     "report": self.store.get_report(params["run_id"]),
                 },
-                secret_env_names=self.secret_env_names,
             )
         if method == "runs.cancel":
-            return self.manager.cancel(params["run_id"])
+            return public_value(self.manager.cancel(params["run_id"]))
         if method == "runs.export":
             return {"path": str(self.store.export_run(params["run_id"]))}
         if method == "runs.review":
@@ -638,7 +684,14 @@ class ApplicationService:
             return {**diff, "text": diff["text"][after:end], "next_character": end,
                     "has_more": end < len(diff["text"])}
         if method == "approvals.list":
-            return self.store.list_approvals()
+            values = self.store.list_approvals()
+            for approval in values:
+                args = json.dumps(approval["args"], ensure_ascii=False)
+                approval["scope"] = {"cwd": str(self.store.root), "path": str(approval["args"].get("path", "."))[:2048]}
+                approval["args_truncated"] = len(args) > 16384
+                if approval["args_truncated"]:
+                    approval["args"] = {"preview": args[:16384]}
+            return values
         if method == "approvals.resolve":
             return self.store.resolve_approval(
                 params["approval_id"], params["approved"]
