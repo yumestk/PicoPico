@@ -147,6 +147,17 @@ def run_command(
                 data["exit_code"] = process.wait(timeout=0.2)
             except subprocess.TimeoutExpired:
                 data["cleanup_confirmed"] = False
+    except KeyboardInterrupt:
+        # The Host uses SIGINT to wake a blocked worker. Preserve known output and
+        # the guardian's real exit status after the same required cleanup path.
+        data["cancelled"] = True
+        data["cleanup_confirmed"] = _stop_guard(process)
+        if not data["cleanup_confirmed"]:
+            raise SystemExit("Command cleanup unconfirmed; workspace remains blocked")
+        data["exit_code"] = process.returncode
+        data["stdout_truncated"] = data["stderr_truncated"] = True
+        if cancel_event is not None:
+            cancel_event.set()
     except BaseException:
         if not _stop_guard(process):
             raise SystemExit("Command cleanup unconfirmed; workspace remains blocked")

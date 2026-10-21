@@ -300,6 +300,101 @@ class StateStore:
             )
         ]
 
+    def list_page(self, kind, cursor="", limit=100, session_id=""):
+        """Insertion order with a fixed high-water mark; updates cannot move rows between pages."""
+        table = "runs" if kind == "runs" else "sessions"
+        maximum = self.connection.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {table}").fetchone()[0]
+        high, after = self._cursor(cursor, [kind, session_id], maximum, maximum + 1)
+        where = "rowid<=? AND rowid<?"
+        parameters = [high, after]
+        if kind == "runs" and session_id:
+            where += " AND session_id=?"
+            parameters.append(session_id)
+        if kind == "sessions":
+            where += " AND json_type(body,'$.config')='object'"
+        columns = "rowid,id AS run_id,session_id,status,parent_run_id,created_at,finished_at" if kind == "runs" else (
+            "rowid,id,json_extract(body,'$.created_at') AS created_at,"
+            "json_extract(body,'$.provider_protocol') AS provider_protocol")
+        rows = self.connection.execute(f"SELECT {columns} FROM {table} WHERE {where} ORDER BY rowid DESC LIMIT ?",
+                                       (*parameters, min(limit, 100) + 1)).fetchall()
+        page = [dict(r) for r in rows[:min(limit, 100)]]
+        next_cursor = self._encode_cursor([kind, session_id], high, page[-1]["rowid"]) if len(rows) > len(page) else None
+        return {"items": self.redact([{k: v for k, v in row.items() if k != "rowid"} for row in page]),
+                "next_cursor": next_cursor, "order": "created_desc"}
+
+    @staticmethod
+    def _encode_cursor(context, high, after):
+        import base64
+        return base64.urlsafe_b64encode(encode([context, high, after]).encode()).decode()
+
+    def _cursor(self, cursor, context, high, after):
+        import base64
+        if not cursor:
+            return high, after
+        try:
+            value = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
+            if (len(cursor) > 1024 or not isinstance(value, list) or len(value) != 3
+                    or value[0] != context or any(type(v) is not int or not 0 <= v < 2**63 for v in value[1:])):
+                raise ValueError()
+            return value[1], value[2]
+        except (ValueError, TypeError, UnicodeError):
+            raise ApplicationError("invalid_request", "Invalid or mismatched cursor") from None
+
+    def shell_begin(self, value, call_id, evidence):
+        # Persist before side effects; a dead worker leaves evidence, never a fabricated exit code.
+        with self.transaction():
+            self.connection.execute("UPDATE tool_calls SET result=? WHERE run_id=? AND call_id=? AND name='run_shell' AND phase='executing'",
+                                    (encode({"data": evidence}), run_id(value), call_id))
+
+    def tool_page(self, value, *, cursor="", limit=100, checks=False):
+        self.get_run(value)
+        maximum = self.connection.execute("SELECT COALESCE(MAX(rowid),0) FROM tool_calls WHERE run_id=?", (run_id(value),)).fetchone()[0]
+        context = ["checks" if checks else "tool_calls", run_id(value)]
+        high, after = self._cursor(cursor, context, maximum, 0)
+        where = "run_id=? AND rowid<=? AND rowid>?"
+        if checks:
+            where += " AND name='run_shell' AND json_extract(args,'$.purpose')='verification'"
+        rows = self.connection.execute(f"SELECT rowid,* FROM tool_calls WHERE {where} ORDER BY rowid LIMIT ?",
+                                       (run_id(value), high, after, min(limit, 100) + 1)).fetchall()
+        target = self._end_scope(value) if checks else None
+        page, size, last = [], 0, after
+        for row in rows[:min(limit, 100)]:
+            item = self._call_view(row)
+            if checks:
+                from .checks import check_view
+                item = check_view(item, target)
+            item = self.redact(item)
+            # Each card is bounded independently; aggregate pages stay below the 1 MiB public transport.
+            encoded = encode(item)
+            if len(encoded.encode()) > 192 * 1024:
+                item = self.redact({"run_id": run_id(value), "call_id": row["call_id"], "name": row["name"],
+                        "phase": row["phase"], "details_truncated": True, "preview": encoded[:8192]})
+                encoded = encode(item)
+            if page and size + len(encoded.encode()) > 256 * 1024:
+                break
+            size += len(encoded.encode())
+            page.append(item)
+            last = row["rowid"]
+        return {"items": page, "next_cursor": self._encode_cursor(context, high, last) if len(rows) > len(page) else None}
+
+    def _call_view(self, row):
+        # Redact before any display slicing so a secret crossing a page boundary cannot leak a prefix.
+        return self.redact({"run_id": row["run_id"], "call_id": row["call_id"], "name": row["name"],
+                "args": json.loads(row["args"]), "phase": row["phase"],
+                "result": json.loads(row["result"]) if row["result"] else None})
+
+    def _end_scope(self, value):
+        from .review import scope_fingerprint
+        return scope_fingerprint(self._review(value).get("end"))
+
+    def checks(self, value, target=None):
+        from .checks import check_view
+        self.get_run(value)
+        target = self._end_scope(value) if target is None else target
+        return [check_view(self._call_view(row), target) for row in self.connection.execute(
+            "SELECT * FROM tool_calls WHERE run_id=? AND name='run_shell' AND json_extract(args,'$.purpose')='verification' ORDER BY rowid",
+            (run_id(value),))]
+
     def set_worker(self, value, instance_id, pid):
         with self.transaction():
             self.connection.execute(
@@ -457,7 +552,7 @@ class StateStore:
                 result = {
                     "status": "error",
                     "error_code": phase,
-                    "data": {},
+                    "data": json.loads(row["result"]).get("data", {}) if row["result"] else {},
                     "message": "Execution interrupted. Inspect the workspace before retrying.",
                     "metadata": {"outcome_unknown": phase == "outcome_unknown"},
                 }
@@ -780,6 +875,7 @@ class StateStore:
             )
         ]
         (root / "tool_results.json").write_text(encode(self.redact(calls)) + "\n")
+        (root / "checks.json").write_text(encode(self.redact(self.checks(value))) + "\n")
         review = self.review_get(value)
         (root / "review.json").write_text(encode(review) + "\n")
         rows = self.review_changes(value)
@@ -816,6 +912,8 @@ class StateStore:
                 result[stage]["content_omissions"] = omissions
         result["change_count"] = len(self.review_changes(value))
         result["initial_change_count"] = len((review.get("baseline") or {}).get("initial_status", []))
+        from .checks import summary
+        result["checks"] = summary(self.checks(value))
         return self.redact(result)
 
     def review_begin(self, value):

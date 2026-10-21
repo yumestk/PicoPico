@@ -344,6 +344,7 @@ class ApplicationService:
         self.manager = RunManager(self.store)
         self.test_script = test_script
         self.stopping = asyncio.Event()
+        self.review_refreshing = False
 
     @staticmethod
     def run(agent, prompt):
@@ -369,19 +370,23 @@ class ApplicationService:
         specifications = {
             "host.info": ({}, {}),
             "host.stop": ({}, {}),
+            "configuration.get": ({}, {}),
             "sessions.create": ({}, {"config": dict}),
-            "sessions.list": ({}, {"limit": int}),
+            "sessions.list": ({}, {"limit": int, "cursor": str}),
             "sessions.get": ({"session_id": str}, {"after_message": int, "limit": int}),
             "sessions.reset": ({"session_id": str}, {}),
             "runs.start": (
                 {"session_id": str, "prompt": str, "client_request_id": str},
                 {"config": dict},
             ),
-            "runs.list": ({}, {"limit": int}),
+            "runs.list": ({}, {"limit": int, "cursor": str, "session_id": str}),
             "runs.get": ({"run_id": str}, {}),
             "runs.cancel": ({"run_id": str}, {}),
             "runs.export": ({"run_id": str}, {}),
             "runs.review": ({"run_id": str}, {}),
+            "runs.review_refresh": ({"run_id": str}, {}),
+            "runs.tool_calls": ({"run_id": str}, {"cursor": str, "limit": int}),
+            "runs.checks": ({"run_id": str}, {"cursor": str, "limit": int}),
             "runs.changes": ({"run_id": str}, {"scope": str, "after_file": int, "limit": int}),
             "runs.diff": ({"run_id": str, "file_id": str}, {"after_character": int, "max_characters": int}),
             "runs.events": (
@@ -403,8 +408,10 @@ class ApplicationService:
             raise ApplicationError("invalid_request", "Invalid method parameters")
         for key, value in params.items():
             expected = {**required, **optional}[key]
-            if type(value) is not expected or (expected is str and not value.strip()):
+            if type(value) is not expected or (expected is str and key != "cursor" and not value.strip()):
                 raise ApplicationError("invalid_request", f"Invalid {key}")
+        if len(params.get("cursor", "")) > 1024:
+            raise ApplicationError("invalid_request", "Invalid cursor")
         for name, low, high in [
             ("limit", 0 if method == "sessions.get" else 1, 500),
             ("after_message", 0, 2**63 - 1),
@@ -456,8 +463,9 @@ class ApplicationService:
             return {
                 "protocol": "pico-host-v1",
                 "backend_version": "0.1.0",
-                "api_version": 2,
-                "capabilities": ["sessions", "runs", "approvals", "events", "run_reviews"],
+                "api_version": 3,
+                "capabilities": ["sessions", "runs", "approvals", "events", "run_reviews",
+                                 "verification_evidence", "query_cursors", "configuration_summary"],
                 "instance_id": self.manager.instance_id,
                 "workspace": str(self.store.root),
                 "status": "stopping"
@@ -470,6 +478,21 @@ class ApplicationService:
             self.manager.accepting = False
             self.stopping.set()
             return {"status": "stopping"}
+        if method == "configuration.get":
+            from urllib.parse import urlsplit, urlunsplit
+            config, _ = freeze_options(self.store.root)
+            model = _build_model_client(SimpleNamespace(**config))
+            endpoint = getattr(model, "base_url", getattr(model, "host", ""))
+            parsed = urlsplit(endpoint)
+            # Credentials and query tokens in custom URLs are never configuration display data.
+            authority = (parsed.hostname or "")
+            if ":" in authority:
+                authority = "[" + authority + "]"
+            if parsed.port:
+                authority += ":" + str(parsed.port)
+            return self.store.redact({"provider": config["provider"], "model": config["model"],
+                                      "endpoint": urlunsplit((parsed.scheme, authority, parsed.path, "", "")),
+                                      "api_key_configured": bool(getattr(model, "api_key", ""))})
         if method == "sessions.create":
             config, protocol = freeze_options(self.store.root, params.get("config"))
             if self.test_script is not None:
@@ -488,6 +511,8 @@ class ApplicationService:
             self.store.save_session(session)
             return public_session(session)
         if method == "sessions.list":
+            if "cursor" in params:
+                return self.store.list_page("sessions", params["cursor"], params.get("limit", 100))
             return [
                 {
                     "id": s["id"],
@@ -507,6 +532,8 @@ class ApplicationService:
             conversation(params["session_id"])
             return public_session(self.store.reset_session(params["session_id"]))
         if method == "runs.start":
+            if self.review_refreshing:
+                raise ApplicationError("workspace_busy", "A bounded review observation is in progress; retry shortly")
             self.manager.pump()
             if not self.manager.accepting or self.manager.blocked:
                 raise ApplicationError(
@@ -546,6 +573,8 @@ class ApplicationService:
             self.manager.pump()
             return run
         if method == "runs.list":
+            if "cursor" in params or "session_id" in params:
+                return self.store.list_page("runs", params.get("cursor", ""), params.get("limit", 100), params.get("session_id", ""))
             return redact_artifact(
                 self.store.list_runs(params.get("limit", 100)),
                 secret_env_names=self.secret_env_names,
@@ -564,6 +593,28 @@ class ApplicationService:
             return {"path": str(self.store.export_run(params["run_id"]))}
         if method == "runs.review":
             return self.store.review_get(params["run_id"])
+        if method in {"runs.tool_calls", "runs.checks"}:
+            return self.store.tool_page(params["run_id"], cursor=params.get("cursor", ""),
+                                        limit=params.get("limit", 100), checks=method == "runs.checks")
+        if method == "runs.review_refresh":
+            from .checks import summary, version_status
+            from .review import observe_scope
+            from .run_manager import execution_idle
+            value = params["run_id"]
+            frozen = self.store._end_scope(value)
+            def busy():
+                return self.review_refreshing or not execution_idle(self.store.root) or bool(self.store.connection.execute(
+                    "SELECT 1 FROM runs WHERE status NOT IN ('completed','stopped','failed','cancelled','interrupted') LIMIT 1").fetchone())
+            if busy():
+                return {"state": "busy", "reason": "workspace_execution_or_observation_active"}
+            self.review_refreshing = True
+            try:
+                current = await asyncio.to_thread(observe_scope, self.store.root)
+                return self.store.redact({"state": "observed", "current_scope": current,
+                    "version_status": version_status(frozen, current), "history_unchanged": True,
+                    "checks": summary(self.store.checks(value, current))})
+            finally:
+                self.review_refreshing = False
         if method == "runs.changes":
             scope = params.get("scope", "run")
             if scope not in {"initial", "run"}:

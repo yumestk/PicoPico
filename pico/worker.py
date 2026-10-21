@@ -108,6 +108,9 @@ class WorkerBridge:
     def review_begin(self, value):
         return self.call("review_begin", value)
 
+    def shell_begin(self, value, call_id, evidence):
+        return self.call("shell_begin", value, call_id, evidence)
+
     def review_blob(self, value, content):
         return self.call("review_blob", value, content)
 

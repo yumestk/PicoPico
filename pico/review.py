@@ -286,6 +286,31 @@ def changes(baseline, end):
     return rows
 
 
+def scope_fingerprint(snapshot):
+    """Content identity of the bounded review scope, independent of stored diff blobs."""
+    if snapshot is None:
+        return None
+    files = snapshot.get("files", {})
+    omissions = sorted({e.get("reason", "") for e in files.values()
+                        if not e.get("fingerprint") or e.get("reason") in {
+                            "sensitive_file", "file_size_limit", "not_regular_file",
+                            "unstable_file", "unreadable_or_unstable", "invalid_path"}})
+    payload = [(path, e.get("fingerprint"), e.get("mode")) for path, e in sorted(files.items())]
+    return {"version": 1, "fingerprint": hashlib.sha256(json.dumps(payload, ensure_ascii=True).encode()).hexdigest(),
+            "captured_at": snapshot.get("captured_at"), "file_count": len(files),
+            "complete": bool(snapshot.get("complete")) and not omissions,
+            "notes": sorted(set(snapshot.get("notes", [])) | set(omissions)),
+            "scope": "bounded_review_files", "git": bool(snapshot.get("git"))}
+
+
+def observe_scope(root):
+    """No blob writes; observation failure never changes tool execution permission."""
+    try:
+        return scope_fingerprint(capture(root, lambda _: "fingerprint_only", seconds=1))
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        return {"complete": False, "notes": ["capture_failed"], "captured_at": now()}
+
+
 def render_diff(value):
     """Pure bounded input, safe to compute outside the Host's connection loop."""
     if not value["available"]:

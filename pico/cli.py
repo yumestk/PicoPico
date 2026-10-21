@@ -159,13 +159,19 @@ def build_arg_parser():
         help="Print run ID and leave execution with the Host.",
     )
     commands.add_parser("chat", help="Interactive session (default command).")
+    commands.add_parser("configuration", help="Show non-secret provider configuration.")
     host = commands.add_parser("host")
     host.add_argument("action", choices=["start", "status", "stop"])
     host.add_argument("--cwd", default=argparse.SUPPRESS)
     runs = commands.add_parser("runs")
-    runs.add_argument("action", choices=["list", "get", "attach", "cancel", "export"])
+    runs.add_argument("action", choices=["list", "get", "attach", "cancel", "export", "review", "changes", "diff", "checks", "tool_calls", "review_refresh"])
     runs.add_argument("run_id", nargs="?")
     runs.add_argument("--after", type=int, default=0)
+    runs.add_argument("--cursor", default="")
+    runs.add_argument("--limit", type=int, default=100)
+    runs.add_argument("--session-id")
+    runs.add_argument("--file-id")
+    runs.add_argument("--scope", choices=["initial", "run"], default="run")
     runs.add_argument("--cwd", default=argparse.SUPPRESS)
     approvals = commands.add_parser("approvals")
     approvals.add_argument("action", choices=["list", "approve", "deny"])
@@ -174,6 +180,8 @@ def build_arg_parser():
     sessions = commands.add_parser("sessions")
     sessions.add_argument("action", choices=["list", "get", "create", "reset"])
     sessions.add_argument("session_id", nargs="?")
+    sessions.add_argument("--cursor", default="")
+    sessions.add_argument("--limit", type=int, default=100)
     return parser
 
 
@@ -248,12 +256,25 @@ def main(argv=None):
             print(json.dumps(result, ensure_ascii=False))
             return 0
         client.ensure()
+        if args.command == "configuration":
+            print(json.dumps(client.call("configuration.get"), ensure_ascii=False))
+            return 0
         if args.command == "runs":
             if args.action != "list" and not args.run_id:
                 raise ApplicationError("invalid_request", "A run ID is required")
             if args.action == "attach":
                 return attach(client, args.run_id, args.after)
             params = {} if args.action == "list" else {"run_id": args.run_id}
+            if args.action in {"list", "tool_calls", "checks"}:
+                params.update(cursor=args.cursor, limit=args.limit)
+            if args.action == "list" and args.session_id:
+                params["session_id"] = args.session_id
+            if args.action == "changes":
+                params.update(after_file=args.after, limit=args.limit, scope=args.scope)
+            if args.action == "diff":
+                if not args.file_id:
+                    raise ApplicationError("invalid_request", "--file-id from runs changes is required")
+                params.update(file_id=args.file_id, after_character=args.after)
             print(
                 json.dumps(
                     client.call("runs." + args.action, params), ensure_ascii=False
@@ -280,7 +301,7 @@ def main(argv=None):
         config = getattr(args, "explicit_config", {})
         if args.command == "sessions":
             if args.action == "list":
-                result = client.call("sessions.list")
+                result = client.call("sessions.list", {"cursor": args.cursor, "limit": args.limit})
             elif args.action == "create":
                 result = client.call("sessions.create", {"config": config})
             else:

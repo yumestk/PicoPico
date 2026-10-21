@@ -120,7 +120,22 @@ class ToolExecutor:
             except (ValueError,TypeError) as exc:
                 return ToolExecutionResult(status='rejected',error_code='invalid_arguments',message=str(exc))
         try:
+            shell_evidence = None
+            if name == "run_shell":
+                from .review import observe_scope
+                from .workspace import now
+
+                shell_evidence = {"command": args["command"], "purpose": args.get("purpose", "general"),
+                                  "cwd": str(agent.root), "started_at": now(), "finished_at": None}
+                if shell_evidence["purpose"] == "verification":
+                    shell_evidence["before_scope"] = observe_scope(agent.root)
+                if agent.current_run_state is not None and agent._active_call_id:
+                    agent.store.shell_begin(agent.current_run_state.run_id, agent._active_call_id, shell_evidence)
             data = tool["run"](args)
+            if shell_evidence is not None:
+                data.update(shell_evidence, finished_at=now())
+                if shell_evidence["purpose"] == "verification":
+                    data["after_scope"] = observe_scope(agent.root)
             after_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else before_snapshot
             affected_paths, diff_summary = agent.diff_workspace_snapshots(before_snapshot, after_snapshot)
             workspace_changed = bool(affected_paths)
@@ -171,4 +186,7 @@ class ToolExecutor:
             )
             metadata["duration_ms"] = int((time.monotonic() - started) * 1000)
             agent.record_process_note_for_tool(name, metadata)
-            return ToolExecutionResult(message=f"tool {name} failed: {exc}", status=metadata["tool_status"], error_code=metadata["tool_error_code"], metadata=metadata)
+            evidence = shell_evidence or {}
+            if evidence:
+                evidence = {**evidence, "finished_at": now()}
+            return ToolExecutionResult(data=evidence, message=f"tool {name} failed: {exc}", status=metadata["tool_status"], error_code=metadata["tool_error_code"], metadata=metadata)

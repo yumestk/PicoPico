@@ -194,7 +194,23 @@ npm run package
 
 新运行会在取得执行槽后保存工作树基线，并在结束时保存冻结的文件差异。基线包含运行开始时你已有的修改，比较不以 HEAD 为起点；审查过程不修改 Git index，也不执行 stash/reset。外部编辑与工具可能交错，因此差异表示运行期间观察到的变化。
 
-`pico runs export <run_id>` 除执行记录外，还导出脱敏的 `review.json`、`changes.json` 和 `diffs.json`。Host 提供 `runs.review`、`runs.changes`、`runs.diff` 查询；桌面审查面板在后续节点接入。敏感文件、二进制、大文件、忽略项与采集失败都有明确范围/缺失提示，不能将没有 Diff 当作没有修改。
+`pico runs export <run_id>` 除执行记录外，还导出脱敏的 `review.json`、`changes.json`、`diffs.json` 和 `checks.json`。CLI 与桌面共用 Host 查询；桌面审查面板在后续节点接入。敏感文件、二进制、大文件、忽略项与采集失败都有明确范围/缺失提示，不能将没有 Diff 当作没有修改。
+
+```bash
+uv run pico runs review <run_id>
+uv run pico runs changes <run_id> --scope run
+uv run pico runs diff <run_id> --file-id <changes返回的id> --after 0
+uv run pico runs checks <run_id> --limit 20
+uv run pico runs tool_calls <run_id> --limit 20
+uv run pico runs review_refresh <run_id>
+uv run pico runs list --session-id <session_id> --limit 20
+uv run pico sessions list --limit 20
+uv run pico configuration
+```
+
+`run_shell` 可声明 `purpose: verification`，默认仍为 `general`，审批、预算与执行路径不变。检查只按真实退出码、超时、取消及中断事实归类；`echo ok` 成功只证明该命令成功，不代表测试覆盖。检查前后及 Run 结束时比较有界审查范围的内容指纹，后续修改使成功证据变为 `stale`，缺失/不完整证据为 `inconclusive`。历史结果保持冻结，`review_refresh` 只返回当前树的漂移观察，执行中返回 `busy`。此范围遵循前述忽略与大小限制，不声明验证整个仓库。
+
+Host API v3 增加 `configuration.get`、`runs.tool_calls`、`runs.checks`、`runs.review_refresh`。列表显式传 `cursor: ""` 开始分页，返回 `items/next_cursor`，后续传回不透明游标；会话和 Run 按稳定创建顺序分页，不被后续更新或新记录打乱。Run 列表支持 `session_id`。工具/检查分页同样使用游标，单页限制 256 KiB、最多 100 条，检查输出每流显示最多 8192 字符并标记截断；完整的执行输出仍受原有 64 KiB/流限制。命令显示也有 8192 字符上限与截断标记，私有记录保留原始命令。旧客户端未传列表游标时仍取得原有列表形状；新 CLI 使用分页。配置查询只返回 provider/model/去掉凭据及查询参数的 endpoint/密钥是否已配置，不返回密钥或环境变量。
 
 首次使用新 Host 时，SQLite schema v1 会备份到 `.pico/backups/` 后事务升级到 v2；保留会话、审批、调用与事件。旧运行没有采集过的差异显示不可用，不从当前文件重建。旧 Host 不会被桌面自动强制重启；有活动任务时先完成或显式取消，再停止旧 Host，下一次连接启动新版。升级后的数据库供新版本使用，旧版本不能直接读取 v2。
 

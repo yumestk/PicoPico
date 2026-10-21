@@ -41,8 +41,9 @@ BASE_TOOL_SPECS = {
     "search": {"schema": object_schema({"pattern": string_schema(nonempty=True), "path": string_schema(".")},
                ["pattern"]), "risky": False, "description": "Search the workspace."},
     "run_shell": {"schema": object_schema({"command": string_schema(nonempty=True),
+                  "purpose": {"type": "string", "enum": ["general", "verification"], "default": "general"},
                   "timeout": integer_schema(20, maximum=120)}, ["command"]), "risky": True,
-                  "description": "Run a shell command in the repo root."},
+                  "description": "Run a shell command in the repo root. Declare purpose=verification for checks; success only proves this command exited zero."},
     "write_file": {"schema": object_schema({"path": string_schema(nonempty=True), "content": string_schema()},
                    ["path", "content"]), "risky": True, "description": "Write a text file."},
     "patch_file": {"schema": object_schema({"path": string_schema(nonempty=True),
@@ -64,6 +65,8 @@ def validate_arguments(schema, args):
         spec = schema["properties"].get(name)
         if spec is None:
             raise ValueError(f"unknown argument: {name}")
+        if "enum" in spec and value not in spec["enum"]:
+            raise ValueError(f"{name} must be one of {spec['enum']}")
         if spec["type"] == "string":
             if not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
@@ -228,8 +231,8 @@ def tool_search(context, args):
 
 
 def tool_run_shell(context, args):
-    command = str(args.get("command", "")).strip()
-    if not command:
+    command = str(args.get("command", ""))
+    if not command.strip():
         raise ValueError("command must not be empty")
     timeout = int(args.get("timeout", 20))
     if timeout < 1 or timeout > 120:

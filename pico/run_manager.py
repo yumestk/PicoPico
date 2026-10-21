@@ -27,6 +27,7 @@ STORE_OPERATIONS = frozenset(
         "resolve_approval",
         "permit",
         "review_begin",
+        "shell_begin",
         "review_blob",
         "review_save",
         "review_unavailable",
