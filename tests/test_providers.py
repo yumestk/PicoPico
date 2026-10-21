@@ -141,3 +141,47 @@ def test_malformed_blocks_raise_a_protocol_error(kind):
         value['message']['tool_calls'] = [42]
     with patch('urllib.request.urlopen', return_value=Response(value)), pytest.raises(ModelProtocolError):
         client(kind).complete(request())
+
+
+@pytest.mark.parametrize('kind', ['messages', 'responses', 'ollama'])
+def test_verification_purpose_survives_native_schema_call_and_result_replay(kind):
+    spec = BASE_TOOL_SPECS['run_shell']
+    req = ModelRequest('instructions', [{'role': 'user', 'content': 'verify'}],
+                       [{'name': 'run_shell', 'description': spec['description'], 'parameters': spec['schema']}], 512)
+    arguments = {'command': 'printf verified', 'purpose': 'verification'}
+    value = payload(kind, calls=True)
+    if kind == 'messages':
+        for block in value['content']:
+            if block['type'] == 'tool_use':
+                block.update(name='run_shell', input=arguments)
+    elif kind == 'responses':
+        for block in value['output']:
+            if block['type'] == 'function_call':
+                block.update(name='run_shell', arguments=json.dumps(arguments))
+    else:
+        for call in value['message']['tool_calls']:
+            call['function'].update(name='run_shell', arguments=arguments)
+    c = client(kind)
+    with patch('urllib.request.urlopen', return_value=Response(value)) as post:
+        result = c.complete(req)
+    tool = json.loads(post.call_args.args[0].data)['tools'][0]
+    schema = tool['input_schema'] if kind == 'messages' else tool['parameters'] if kind == 'responses' else tool['function']['parameters']
+    assert schema['properties']['purpose']['enum'] == ['general', 'verification']
+    assert 'purpose' not in schema['required']
+    assert all(call.name == 'run_shell' and call.arguments == arguments for call in result.tool_calls)
+    req.messages.append(result.message())
+    evidence = json.dumps({'status': 'ok', 'data': {'purpose': 'verification', 'exit_code': 0}})
+    for call in result.tool_calls:
+        req.messages.append({'role': 'tool', 'call_id': call.id, 'name': call.name, 'content': evidence, 'status': 'ok'})
+    with patch('urllib.request.urlopen', return_value=Response(payload(kind))) as post:
+        assert c.complete(req).text == 'done'
+    sent = json.loads(post.call_args.args[0].data)
+    messages = sent['input'] if kind == 'responses' else sent['messages']
+    if kind == 'responses':
+        outputs = [item['output'] for item in messages if item.get('type') == 'function_call_output']
+    elif kind == 'messages':
+        outputs = [block['content'] for message in messages if isinstance(message['content'], list)
+                   for block in message['content'] if block['type'] == 'tool_result']
+    else:
+        outputs = [message['content'] for message in messages if message['role'] == 'tool']
+    assert outputs == [evidence, evidence]

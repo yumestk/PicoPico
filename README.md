@@ -198,6 +198,27 @@ npm run package
 
 首版仅支持 macOS arm64 的本地内部试用，尚未签名公证。桌面“修改与验证”面板提供冻结 Diff、开始前已有修改、验证命令与范围说明；“刷新当前漂移”单独观察当前文件，不覆盖历史。宽窗口并排审查，窄窗口切换对话与审查，工具卡片可跳到相关文件或检查；Diff、文件列表和检查记录均分页读取。构建下载发生在打包阶段，Python 的来源与校验值见 `desktop/python-runtime.json`。运行 `npm run test:electron` 可验收真实打包窗口、CLI 交叉控制、回执丢失与退出恢复、跨工作区隔离、版本不兼容路径，以及脏工作树审查、失败/未知/取消、分页与中文输入法；模型请求使用本地原生 HTTP fixture，不等同于 live 效果验收。
 
+可重复验收命令（先完成 `npm run package`，再运行窗口测试）：
+
+```bash
+uv run python -m pytest tests -q
+uv run --no-project --python 3.10 --with pytest python -m pytest tests -q
+cd desktop
+npm run typecheck
+npm test
+npm run test:electron
+```
+
+默认窗口测试使用本地协议 fixture，真实模型测试默认跳过。要执行 DeepSeek 真实桌面验收，在 `desktop/` 下显式运行：
+
+```bash
+PICO_LIVE_PROVIDER=deepseek npm run test:electron -- live.spec.ts
+```
+
+该测试会产生真实 API 请求及相应费用，读取上级项目的 `.env`；也可用 `PICO_LIVE_ENV=/absolute/config-directory` 指定含 `.env` 的目录。测试只在临时 Git 仓库执行，临时配置权限为 0600，结束后删除；验证桌面提交、审批、退出重开、保留已有修改、Diff/检查与同会话取消，不修改源仓库。`PICO_TEST_APP=/absolute/Pico.app` 可选择移动后的待验收应用，默认使用上述本地打包输出。截图与 JSON 留在 `desktop/test-results/`，不进入 Git。
+
+当前内部验收平台为 macOS arm64。DeepSeek 原生 Messages 桌面流程已通过；OpenAI/Anthropic 的 live 验收缺少密钥，Ollama 的本地服务不可达，均记录为 blocked；三类原生协议另有离线 schema/工具回放回归。固定 12 任务通过；恢复实验成功率仍为 0.9，不作全通过或模型效果承诺。
+
 ### 运行差异与数据升级
 
 新运行会在取得执行槽后保存工作树基线，并在结束时保存冻结的文件差异。基线包含运行开始时你已有的修改，比较不以 HEAD 为起点；审查过程不修改 Git index，也不执行 stash/reset。外部编辑与工具可能交错，因此差异表示运行期间观察到的变化。

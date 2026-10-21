@@ -12,6 +12,7 @@ test('moved application opens through macOS LaunchServices', async () => {
   let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | undefined;
   let pid: number | undefined;
   try {
+    const started = performance.now();
     execFileSync('/usr/bin/open', ['-n', bundle, '--args', `--user-data-dir=${profile}`, '--remote-debugging-port=0'],
       { env: { HOME: os.homedir(), PATH: '/usr/bin:/bin' } });
     let port = '';
@@ -25,10 +26,11 @@ test('moved application opens through macOS LaunchServices', async () => {
     pid = processes.processInfo.find(value => value.type === 'browser')?.id;
     const window = browser.contexts()[0].pages()[0];
     await expect(window.getByRole('heading', { name: '从一个工作区开始。' })).toBeVisible();
+    const launchMs = Math.round(performance.now() - started);
     expect(window.url()).toBe('pico://app/index.html');
     await window.screenshot({ path: 'test-results/launch-services.png' });
     await fs.writeFile('test-results/launch-services.json', JSON.stringify({ passed: true, launch: 'macOS LaunchServices',
-      bundle, page: window.url(), external_server: false }, null, 2));
+      bundle, page: window.url(), external_server: false, launch_to_welcome_ms: launchMs }, null, 2));
   } finally {
     // Only terminate the live test process if it still carries this unique test profile.
     if (pid) {
