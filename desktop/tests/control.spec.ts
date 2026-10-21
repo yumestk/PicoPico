@@ -184,6 +184,10 @@ with Path(sys.argv[1],'.pico/execution.lock').open('a+') as lock:
     await window.getByRole('button', { name: '继续加载历史' }).click();
     await expect(window.getByText('ROOT-B-079', { exact: true })).toBeAttached();
     await expect(window.locator('[data-message-id]')).toHaveCount(80);
+    await window.getByLabel('发送任务', { exact: true }).fill('x'.repeat(1024 * 1024));
+    await window.getByRole('button', { name: '发送任务', exact: true }).click();
+    await expect(window.getByRole('alert').filter({ hasText: 'invalid_request' })).toBeVisible();
+    await expect(window.getByRole('button', { name: '重试确认同一次发送' })).toHaveCount(0);
     await window.getByLabel('发送任务', { exact: true }).fill('blocked request');
     await window.getByRole('button', { name: '发送任务', exact: true }).click();
     await expect(window.getByRole('alert').filter({ hasText: 'workspace_blocked' })).toBeVisible();

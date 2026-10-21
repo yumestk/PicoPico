@@ -59,3 +59,8 @@ test('aborting a long poll closes its socket while another control call still wo
   await peerClosed;
   await assert.rejects(callHost(socket, '/workspace', 'runs.events', {}, 15000, controller.signal), /cancelled/);
 });
+
+test('oversized submissions are explicit local rejections before opening a connection', async () => {
+  await assert.rejects(callHost('/no/socket/should/be/opened', '/workspace', 'runs.start',
+    { prompt: 'x'.repeat(1024 * 1024) }), /invalid_request: Host request exceeds size limit/);
+});

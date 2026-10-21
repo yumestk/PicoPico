@@ -10,7 +10,7 @@ export function callHost<T>(socket: string, workspace: string, method: string,
   params: Record<string, unknown> = {}, timeout = 5000, signal?: AbortSignal): Promise<T> {
   const id = randomUUID();
   const request = Buffer.from(JSON.stringify({ id, protocol: PROTOCOL, workspace, method, params }) + '\n');
-  if (request.length > MAX_MESSAGE) return Promise.reject(new Error('Host request exceeds size limit'));
+  if (request.length > MAX_MESSAGE) return Promise.reject(new Error('invalid_request: Host request exceeds size limit'));
   return new Promise((resolve, reject) => {
     const connection = net.createConnection(socket);
     let buffer = Buffer.alloc(0);
