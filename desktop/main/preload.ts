@@ -2,6 +2,9 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { Activity, DesktopAPI } from '../shared';
 
 const api: DesktopAPI = {
+  modelSettings: () => ipcRenderer.invoke('models:get'),
+  saveModelSettings: value => ipcRenderer.invoke('models:save', value),
+  importModelSettings: () => ipcRenderer.invoke('models:import'),
   chooseWorkspace: () => ipcRenderer.invoke('workspace:choose'),
   recentWorkspaces: () => ipcRenderer.invoke('workspace:recent'),
   openRecent: id => ipcRenderer.invoke('workspace:openRecent', id),

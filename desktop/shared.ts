@@ -45,7 +45,12 @@ export interface HostMethods {
   'approvals.list': { params: Record<string, never>; result: Approval[] };
   'approvals.resolve': { params: { approval_id: string; approved: boolean }; result: Approval };
 }
+export interface ModelSettings { provider: string; configured: boolean; profiles: Record<string, { model: string; endpoint: string; api_key_configured: boolean }> }
+export interface ModelSettingsInput { provider: string; model: string; endpoint: string; api_key?: string; clear_api_key?: boolean }
 export interface DesktopAPI {
+  modelSettings(): Promise<ModelSettings>;
+  saveModelSettings(value: ModelSettingsInput): Promise<ModelSettings>;
+  importModelSettings(): Promise<ModelSettings | null>;
   chooseWorkspace(): Promise<Workspace | null>;
   recentWorkspaces(): Promise<RecentWorkspace[]>;
   openRecent(id: string): Promise<Workspace>;

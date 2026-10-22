@@ -13,7 +13,7 @@ test('desktop and CLI share approval/cancel and recover the same submission afte
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-controls-'));
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-controls-profile-'));
   const python = path.join(portable.bundle, 'Contents/Resources/backend/python/bin/python3');
-  const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(), TMPDIR: os.tmpdir() };
+  const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(), TMPDIR: os.tmpdir(), PICO_CONFIG_DIR: path.join(profile, 'settings') };
   const query = (method: string, params = {}) => JSON.parse(execFileSync(python, ['-I', '-B', '-c',
     'import json,sys;from pico.host_client import HostClient;print(json.dumps(HostClient(sys.argv[1]).call(sys.argv[2],json.loads(sys.argv[3]))))',
     root, method, JSON.stringify(params)], { env, encoding: 'utf8' }));
@@ -127,7 +127,7 @@ test('workspace switches reject late history and blocked work is not submitted; 
   const profile = path.join(base, 'profile'); await fs.mkdir(profile);
   const roots = [path.join(base, 'workspace-a'), path.join(base, 'workspace-b')];
   const python = path.join(portable.bundle, 'Contents/Resources/backend/python/bin/python3');
-  const env = { PATH: '/usr/bin:/bin', HOME: os.homedir(), TMPDIR: os.tmpdir() };
+  const env = { PATH: '/usr/bin:/bin', HOME: os.homedir(), TMPDIR: os.tmpdir(), PICO_CONFIG_DIR: path.join(profile, 'settings') };
   const hosts = [];
   const query = (root: string, method: string, params = {}) => JSON.parse(execFileSync(python, ['-I', '-B', '-c',
     'import json,sys;from pico.host_client import HostClient;print(json.dumps(HostClient(sys.argv[1]).call(sys.argv[2],json.loads(sys.argv[3]))))',
@@ -247,7 +247,7 @@ test('incompatible Host is visible and manual upgrade leaves its active approval
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-upgrade-'));
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-upgrade-profile-'));
   const python = path.join(portable.bundle, 'Contents/Resources/backend/python/bin/python3');
-  const env = { PATH: '/usr/bin:/bin', HOME: os.homedir(), TMPDIR: os.tmpdir() };
+  const env = { PATH: '/usr/bin:/bin', HOME: os.homedir(), TMPDIR: os.tmpdir(), PICO_CONFIG_DIR: path.join(profile, 'settings') };
   const query = (method: string, params = {}) => JSON.parse(execFileSync(python, ['-I', '-B', '-c',
     'import json,sys;from pico.host_client import HostClient;print(json.dumps(HostClient(sys.argv[1]).call(sys.argv[2],json.loads(sys.argv[3]))))',
     root, method, JSON.stringify(params)], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));

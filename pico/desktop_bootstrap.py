@@ -22,13 +22,22 @@ def bootstrap(directory, upgrade=False):
     if upgrade:
         if "idle_upgrade" not in info.get("capabilities", []):
             raise ApplicationError("manual_upgrade_required", "旧 Host 不支持原子空闲升级。请先完成任务，再用 CLI 停止 Host，然后重新连接；桌面不会停止活动任务。")
-        client.call("host.stop_if_idle")
+        try:
+            client.call("host.stop_if_idle")
+        except ApplicationError as exc:
+            # An older Host may close after accepting the stop, before sending its ACK.
+            # Observe shutdown below; never replace the atomic guard with a forced stop.
+            if exc.code != "invalid_response":
+                raise
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
             try:
                 client.call("host.info")
             except OSError:
                 break
+            except ApplicationError as exc:
+                if exc.code != "invalid_response":
+                    raise
             time.sleep(0.05)
         else:
             raise ApplicationError("upgrade_timeout", "Host is still stopping; reconnect later")

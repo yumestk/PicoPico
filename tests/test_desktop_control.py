@@ -168,3 +168,25 @@ def test_invalid_project_config_is_a_configuration_error_without_env_contents(tm
             (tmp_path / '.env').unlink()
             await app.close()
     asyncio.run(scenario())
+
+
+def test_idle_upgrade_tolerates_lost_stop_ack_without_forcing_stop(tmp_path, monkeypatch):
+    calls = []
+    class LostAckHost:
+        def __init__(self, root):
+            self.root = Path(root)
+            self.path = self.root / 'unused'
+            self.stopped = False
+        def ensure(self):
+            return {'workspace': str(self.root), 'api_version': 4, 'capabilities': ['idle_upgrade'], 'restarted': self.stopped}
+        def call(self, method):
+            calls.append(method)
+            if method == 'host.stop_if_idle':
+                self.stopped = True
+                raise ApplicationError('invalid_response', 'ACK lost after accepting stop')
+            if method == 'host.info':
+                raise OSError('Closed')
+            raise AssertionError('Unexpected method')
+    monkeypatch.setattr('pico.desktop_bootstrap.HostClient', LostAckHost)
+    assert bootstrap(tmp_path, upgrade=True)['info']['restarted']
+    assert calls == ['host.stop_if_idle', 'host.info']

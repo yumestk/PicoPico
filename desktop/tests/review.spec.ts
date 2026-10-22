@@ -6,13 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { portableApp } from './portable-app';
 
-const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(), TMPDIR: os.tmpdir() };
 
 test('native workflow reopens to frozen dirty-worktree Diff, checks, tool links and current drift; narrow IME stays usable', async () => {
   test.setTimeout(120000);
   const portable = await portableApp();
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-review-'));
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-review-profile-'));
+  const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(), TMPDIR: os.tmpdir(), PICO_CONFIG_DIR: path.join(profile, 'settings') };
   const python = path.join(portable.bundle, 'Contents/Resources/backend/python/bin/python3');
   const query = (method: string, params = {}) => JSON.parse(execFileSync(python, ['-I', '-B', '-c',
     'import json,sys;from pico.host_client import HostClient;print(json.dumps(HostClient(sys.argv[1]).call(sys.argv[2],json.loads(sys.argv[3]))))',
@@ -144,6 +144,7 @@ test('review keeps failed, stale, not-run, interrupted and cancelled evidence ho
   const portable = await portableApp();
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-review-states-'));
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-review-states-profile-'));
+  const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(), TMPDIR: os.tmpdir(), PICO_CONFIG_DIR: path.join(profile, 'settings') };
   const python = path.join(portable.bundle, 'Contents/Resources/backend/python/bin/python3');
   const query = (method: string, params = {}) => JSON.parse(execFileSync(python, ['-I', '-B', '-c',
     'import json,sys;from pico.host_client import HostClient;print(json.dumps(HostClient(sys.argv[1]).call(sys.argv[2],json.loads(sys.argv[3]))))',

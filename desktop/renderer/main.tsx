@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { compatible, type Approval, type Config, type Configuration, type DesktopAPI, type Message,
   type EvidenceLink, type RecentWorkspace, type Run, type RunItem, type Session, type SessionItem, type Submission, type ToolCall, type Workspace } from '../shared';
 import { ReviewPanel } from './review';
+import { Settings } from './settings';
 import './style.css';
 
 declare global { interface Window { pico: DesktopAPI } }
@@ -21,6 +22,7 @@ function pendingFor(workspace: Workspace): Submission | null {
 }
 
 function App() {
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [recent, setRecent] = useState<RecentWorkspace[]>([]);
   const [busy, setBusy] = useState(true);
@@ -52,6 +54,7 @@ function App() {
       <p className="caption">工作区</p><button disabled={busy} onClick={() => void connect('choose')}>＋ 选择工作区</button>
       <nav aria-label="最近工作区">{recent.map(r => <button key={r.id} className={workspace?.workspace === r.workspace ? 'selected' : ''}
         disabled={busy} title={r.workspace} onClick={() => void connect('recent', r.id)}>{r.workspace.split('/').at(-1)}</button>)}</nav>
+      <button onClick={() => setSettingsOpen(true)}>Pico 模型设置</button>
       <div className="sidebar-foot">文件留在本地<br />关闭窗口，任务继续</div></aside>
     <main><header><div><strong>{workspace?.workspace.split('/').at(-1) ?? '工作区'}</strong>
       {workspace && <span className="path" data-testid="workspace-path">{workspace.workspace}</span>}</div>
@@ -68,7 +71,9 @@ function App() {
           <code>pico --cwd {'"' + workspace.workspace + '"'} host stop</code></section>
           : <WorkspaceView key={`${workspace.handle}:${workspace.info.instance_id}:${epoch}`} workspace={workspace} onDisconnect={() => setDisconnected(true)} />}
       {workspace && <footer><span>{workspace.info.protocol}</span><span>Host {workspace.info.backend_version} · API {workspace.info.api_version}</span></footer>}
-    </main></div>;
+    </main>{settingsOpen && <Settings onClose={() => setSettingsOpen(false)} onSaved={() => {
+      setSettingsOpen(false); if (workspace) void connect('refresh');
+    }} />}</div>;
 }
 
 function WorkspaceView({ workspace, onDisconnect }: { workspace: Workspace; onDisconnect: () => void }) {
@@ -128,8 +133,8 @@ function WorkspaceView({ workspace, onDisconnect }: { workspace: Workspace; onDi
   }
   return <div className="workspace-body"><aside className="sessions"><div className="card-heading"><h2>会话</h2><button disabled={busy} onClick={() => void createSession()}>新建会话</button></div>
     <details><summary>新会话设置</summary><label>提供方<select aria-label="新会话提供方" value={provider} onChange={e => setProvider(e.target.value)}>
-      <option value="">项目默认{config ? ` · ${config.provider}` : ''}</option>{['deepseek', 'anthropic', 'openai', 'ollama'].map(p => <option key={p}>{p}</option>)}</select></label>
-      <label>模型<input aria-label="新会话模型" value={model} placeholder="项目或提供方默认" onChange={e => setModel(e.target.value)} /></label>
+      <option value="">默认设置{config ? ` · ${config.provider}` : ''}</option>{['deepseek', 'anthropic', 'openai', 'ollama'].map(p => <option key={p}>{p}</option>)}</select></label>
+      <label>模型<input aria-label="新会话模型" value={model} placeholder="Pico 或提供方默认" onChange={e => setModel(e.target.value)} /></label>
       <label>审批<select aria-label="新会话审批模式" value={approval} onChange={e => setApproval(e.target.value)}><option value="ask">每次询问</option><option value="never">禁止写入</option><option value="auto">自动批准</option></select></label></details>
     <nav aria-label="会话列表">{sessions.map(s => <button key={s.id} aria-current={s.id === sessionId ? 'true' : undefined} onClick={() => chooseSession(s.id)}>
       <span>{s.id.slice(-8)}</span><small>{s.provider_protocol} · {new Date(s.created_at).toLocaleDateString()}</small></button>)}</nav>
@@ -220,6 +225,9 @@ function SessionView({ workspace, sessionId, onDisconnect }: { workspace: Worksp
     } catch (reason) { if (alive.current) setError(textError(reason)); }
   }
   async function submit(retry = false) {
+    if (!retry && config?.provider === 'deepseek' && !config.api_key_configured) {
+      setSubmissionError('请先在左侧“Pico 模型设置”中配置 API key；更换服务地址后请新建会话。'); return;
+    }
     if (sendLock.current || (retry && pending?.session_id !== sessionId) || (!retry && (pending || !prompt.trim()))) return;
     sendLock.current = true; setSending(true); setSubmissionError('');
     const intent = retry ? pending! : { session_id: sessionId, prompt: prompt.trim(), client_request_id: crypto.randomUUID(), config: { approval } };
@@ -244,7 +252,8 @@ function SessionView({ workspace, sessionId, onDisconnect }: { workspace: Worksp
     <button aria-pressed={view === 'review'} onClick={() => setView('review')}>修改与验证</button></div>
     <div className="session-layout" data-view={view}><div className="conversation"><div className="session-heading"><h2>会话 {sessionId.slice(-8)}</h2>
     <p>{config?.provider} · {config?.model} · <span>{session?.provider_protocol}</span></p>
-    <details><summary>模型连接</summary><p>{config?.endpoint}</p><p>{config?.api_key_configured ? '密钥已配置' : config?.provider === 'ollama' ? '本地模型无需 API 密钥' : '未配置密钥。如服务需要认证，请在工作区 .env 配置对应 PICO_*_API_KEY，然后刷新连接。'}</p></details></div>
+    <details><summary>模型连接</summary><p>{config?.endpoint}</p><p>{config?.api_key_configured ? '密钥已配置' : config?.provider === 'ollama' ? '本地模型无需 API 密钥' : '未配置密钥。如服务需要认证，请在左侧“Pico 模型设置”中配置一次，所有项目共用。'}</p></details></div>
+    <p className="session-config-note muted">会话保留创建时的模型；修改 Pico 默认模型后，请新建会话。</p>
     {error && <p role="alert" className="error">{error}</p>}
     <div className="conversation-scroll"><section className="history" aria-label="会话历史">{messages.filter(m => m.role !== 'tool' && (m.content || !(m.tool_calls?.length || m.tool_call_count))).map(m =>
       <article className={`message ${m.role}`} key={m.message_id} data-message-id={m.message_id}><small>{m.role === 'user' ? '你' : 'Pico'}</small><pre>{m.content}</pre>{m.content_truncated && <small>消息已截断，完整记录可由 CLI 导出。</small>}</article>)}

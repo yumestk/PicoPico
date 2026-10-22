@@ -27,12 +27,12 @@ test('packaged window bootstraps an independent Host and quitting only detaches'
   await new Promise<void>(resolve => model.listen(0, '127.0.0.1', resolve));
   const address = model.address() as { port: number };
   const query = (code: string, ...args: string[]) => execFileSync(python, ['-I', '-B', '-c', code, directory, ...args],
-    { cwd: directory, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: os.homedir() } });
+    { cwd: directory, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: os.homedir(), PICO_CONFIG_DIR: userData } });
   const application = await electron.launch({
     executablePath: path.join(bundle, 'Contents/MacOS/Pico'),
     args: [`--user-data-dir=${userData}`],
     cwd: directory,
-    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(),
+    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(), PICO_CONFIG_DIR: userData,
       TMPDIR: os.tmpdir(), PYTHONPATH: directory },
   });
   let closed = false;
@@ -45,7 +45,7 @@ test('packaged window bootstraps an independent Host and quitting only detaches'
     // Deny the backend process tree all reads of the developer checkout, without moving user files.
     const profile = `(version 1)(allow default)(deny file-read* (subpath ${JSON.stringify(path.resolve('..'))}))`;
     execFileSync('/usr/bin/sandbox-exec', ['-p', profile, python, '-I', '-B', '-m', 'pico.desktop_bootstrap', '--workspace', directory],
-      { cwd: directory, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: os.homedir() } });
+      { cwd: directory, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: os.homedir(), PICO_CONFIG_DIR: userData } });
     await application.evaluate(({ dialog }, directory) => {
       dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [directory] })) as typeof dialog.showOpenDialog;
     }, directory);
@@ -53,7 +53,7 @@ test('packaged window bootstraps an independent Host and quitting only detaches'
     await expect(window.getByTestId('workspace-path')).toHaveText(await fs.realpath(directory));
     await expect(window.getByText('pico-host-v1', { exact: true })).toBeVisible();
     expect(await window.evaluate(() => ({ node: typeof (globalThis as unknown as { require?: unknown }).require,
-      keys: Object.keys(window.pico).sort() }))).toEqual({ node: 'undefined', keys: ['chooseWorkspace', 'onActivity', 'openRecent', 'recentWorkspaces', 'refreshWorkspace', 'rememberSelection', 'request', 'restoreWorkspace', 'stopWatch', 'upgradeHost', 'watchRun'] });
+      keys: Object.keys(window.pico).sort() }))).toEqual({ node: 'undefined', keys: ['chooseWorkspace', 'importModelSettings', 'modelSettings', 'onActivity', 'openRecent', 'recentWorkspaces', 'refreshWorkspace', 'rememberSelection', 'request', 'restoreWorkspace', 'saveModelSettings', 'stopWatch', 'upgradeHost', 'watchRun'] });
     await window.screenshot({ path: 'test-results/connected.png' });
     const run = JSON.parse(query('import json,sys;from pico.host_client import HostClient;c=HostClient(sys.argv[1]);s=c.call("sessions.create",{"config":{"provider":"anthropic","base_url":sys.argv[2],"approval":"auto"}});print(json.dumps(c.call("runs.start",{"session_id":s["id"],"prompt":"Run the requested shell once","client_request_id":"desktop-smoke"})))', `http://127.0.0.1:${address.port}`));
     await expect.poll(async () => fs.readFile(path.join(directory, 'started'), 'utf8').catch(() => '')).toBe('ready');
@@ -61,7 +61,7 @@ test('packaged window bootstraps an independent Host and quitting only detaches'
     closed = true;
     const state = execFileSync(python, ['-I', '-B', '-c',
       'import json,sys;from pico.host_client import HostClient;c=HostClient(sys.argv[1]);print(json.dumps(c.call("host.info")))', directory],
-      { cwd: directory, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: os.homedir() } });
+      { cwd: directory, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: os.homedir(), PICO_CONFIG_DIR: userData } });
     expect(JSON.parse(state).status).toBe('ready');
     await expect.poll(() => JSON.parse(query('import json,sys;from pico.host_client import HostClient;print(json.dumps(HostClient(sys.argv[1]).call("runs.get",{"run_id":sys.argv[2]})))', run.run_id)).status).toBe('completed');
     expect(await fs.readFile(path.join(directory, 'native-proof'), 'utf8')).toBe('finished');

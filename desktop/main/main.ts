@@ -1,11 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, session } from 'electron';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { callHost, hostInfo } from './host-client';
-import type { Activity, Run, RunEvent, Selection, Workspace } from '../shared';
+import type { Activity, ModelSettings, Run, RunEvent, Selection, Workspace } from '../shared';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'pico', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 const execute = promisify(execFile);
@@ -56,14 +56,42 @@ function selected(handle: unknown) {
 function identifier(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !value || value.length > 200) throw new Error('Invalid identifier');
 }
+function backend() {
+  const root = app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.join(app.getAppPath(), 'runtime/backend');
+  return { root, python: path.join(root, 'python/bin/python3'), env: { ...process.env,
+    PICO_CONFIG_DIR: process.env.PICO_CONFIG_DIR || app.getPath('userData'), SSL_CERT_FILE: path.join(root, 'cacert.pem') } };
+}
+async function modelSettings(action: 'status' | 'save' | 'import', input?: unknown, file?: string): Promise<ModelSettings> {
+  const target = backend();
+  const body = JSON.stringify(input ?? {});
+  if (Buffer.byteLength(body) > 65536) throw new Error('模型设置超过大小上限');
+  return new Promise((resolve, reject) => {
+    const child = spawn(target.python, ['-I', '-B', '-m', 'pico.settings', action, ...(file ? ['--file', file] : [])],
+      { cwd: target.root, env: target.env, stdio: ['pipe', 'pipe', 'ignore'] });
+    let output = ''; let settled = false;
+    const finish = (error?: Error, result?: ModelSettings) => {
+      if (settled) return; settled = true; clearTimeout(timer);
+      if (error) { child.kill(); reject(error); } else resolve(result!);
+    };
+    const timer = setTimeout(() => finish(new Error('模型设置操作超时')), 10000);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => { output += chunk; if (Buffer.byteLength(output) > 65536) finish(new Error('模型设置响应过大')); });
+    child.on('error', () => finish(new Error('无法启动模型设置服务')));
+    child.stdin.on('error', () => finish(new Error('无法保存模型设置')));
+    child.on('close', code => {
+      try { const value = JSON.parse(output); finish(code ? new Error(value.error || '模型设置操作失败') : undefined, value); }
+      catch { finish(new Error('模型设置响应无效')); }
+    });
+    child.stdin.end(body);
+  });
+}
 async function openWorkspace(directory: string, upgrade = false): Promise<Workspace> {
-  const backend = app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.join(app.getAppPath(), 'runtime/backend');
-  const python = path.join(backend, 'python/bin/python3');
+  const target = backend();
   let stdout: string;
   try {
-    ({ stdout } = await execute(python, ['-I', '-B', '-m', 'pico.desktop_bootstrap', '--workspace', directory, ...(upgrade ? ['--upgrade'] : [])], {
-      cwd: backend, timeout: 25000, maxBuffer: 65536,
-      env: { ...process.env, SSL_CERT_FILE: path.join(backend, 'cacert.pem') },
+    ({ stdout } = await execute(target.python, ['-I', '-B', '-m', 'pico.desktop_bootstrap', '--workspace', directory, ...(upgrade ? ['--upgrade'] : [])], {
+      cwd: target.root, timeout: 25000, maxBuffer: 65536,
+      env: target.env,
     }));
   } catch (error) {
     const output = (error as { stdout?: string }).stdout;
@@ -74,6 +102,8 @@ async function openWorkspace(directory: string, upgrade = false): Promise<Worksp
   if (typeof value.workspace !== 'string' || typeof value.socket !== 'string'
     || !path.isAbsolute(value.workspace) || !path.isAbsolute(value.socket)) throw new Error('Invalid workspace bootstrap');
   const info = await hostInfo(value.socket, value.workspace);
+  if (!upgrade && !info.capabilities?.includes('global_model_settings') && (await modelSettings('status')).configured
+    && info.capabilities?.includes('idle_upgrade')) return openWorkspace(directory, true);
   const known = [...workspaces.entries()].find(([, w]) => w.workspace === value.workspace);
   const handle = known?.[0] ?? randomUUID();
   workspaces.set(handle, { workspace: value.workspace, socket: value.socket });
@@ -110,6 +140,23 @@ else {
     });
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     session.defaultSession.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !details.url.startsWith('pico://app/') }));
+    let modelSaving = false;
+    ipcMain.handle('models:get', event => { checkSender(event); return modelSettings('status'); });
+    ipcMain.handle('models:save', async (event, input: unknown) => {
+      checkSender(event);
+      if (modelSaving) throw new Error('正在保存模型设置');
+      modelSaving = true;
+      try { return await modelSettings('save', input); } finally { modelSaving = false; }
+    });
+    ipcMain.handle('models:import', async event => {
+      checkSender(event);
+      if (modelSaving) throw new Error('正在保存模型设置');
+      modelSaving = true;
+      try {
+        const result = await dialog.showOpenDialog(window!, { title: '导入已有模型配置', properties: ['openFile', 'showHiddenFiles'] });
+        return result.canceled ? null : await modelSettings('import', undefined, result.filePaths[0]);
+      } finally { modelSaving = false; }
+    });
     ipcMain.handle('workspace:choose', async event => {
       checkSender(event);
       const result = await dialog.showOpenDialog(window!, { title: '选择 Pico 工作区', properties: ['openDirectory'] });

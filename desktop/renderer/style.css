@@ -63,3 +63,8 @@ footer { display: flex; justify-content: space-between; border-top: 1px solid #d
   .review-pane { flex: 1; width: auto; max-width: none; min-width: 0; border-left: 0; }
 }
 @media (max-width: 760px) { .workspaces { width: 100px; } .sessions { width: 145px; padding: 10px 8px; } .brand { font-size: 20px; gap: 6px; } .mark { font-size: 26px; } .header-actions { max-width: 160px; } .session-heading { padding: 8px 12px; } }
+
+.model-settings { width: min(540px, calc(100vw - 40px)); max-height: calc(100vh - 50px); overflow-y: auto; border: 1px solid #c9d2c1; border-radius: 12px; background: #f7f7f3; color: #28312f; padding: 24px; }
+.model-settings::backdrop { background: #172d2566; } .model-settings h2 { font-size: 20px; } .model-settings p { font-size: 12px; }
+.model-settings .clear-key { display: flex; align-items: center; } .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+.model-settings .error { margin: 10px 0; } .session-config-note { margin: 0; padding: 8px 16px; border-bottom: 1px solid #e1e6dc; }

@@ -13,6 +13,7 @@ from .providers.clients import (
     OpenAICompatibleModelClient,
 )
 from .runtime import Pico
+from .settings import DEFAULTS, bound_key
 from .state_store import StateStore
 from .workspace import WorkspaceContext
 
@@ -32,28 +33,28 @@ DEFAULT_SECRET_ENV_NAMES = (
 )
 
 
-DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
+DEFAULT_OLLAMA_MODEL = DEFAULTS["ollama"][0]
 
 
-DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_HOST = DEFAULTS["ollama"][1]
 
 
-DEFAULT_OPENAI_MODEL = "gpt-5.4"
+DEFAULT_OPENAI_MODEL = DEFAULTS["openai"][0]
 
 
-DEFAULT_OPENAI_BASE_URL = "https://www.right.codes/codex/v1"
+DEFAULT_OPENAI_BASE_URL = DEFAULTS["openai"][1]
 
 
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
+DEFAULT_ANTHROPIC_MODEL = DEFAULTS["anthropic"][0]
 
 
-DEFAULT_ANTHROPIC_BASE_URL = "https://www.right.codes/claude/v1"
+DEFAULT_ANTHROPIC_BASE_URL = DEFAULTS["anthropic"][1]
 
 
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEFAULT_DEEPSEEK_MODEL = DEFAULTS["deepseek"][0]
 
 
-DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
+DEFAULT_DEEPSEEK_BASE_URL = DEFAULTS["deepseek"][1]
 
 
 DEFAULT_PROVIDER = "deepseek"
@@ -114,7 +115,7 @@ def _effective_model(args, provider):
         if model:
             return model
         return DEFAULT_DEEPSEEK_MODEL
-    return DEFAULT_OLLAMA_MODEL
+    return provider_env("PICO_OLLAMA_MODEL", default=DEFAULT_OLLAMA_MODEL)
 
 
 def _configured_secret_names(args):
@@ -150,7 +151,7 @@ def _build_model_client(args):
         return OpenAICompatibleModelClient(
             model=model,
             base_url=base_url,
-            api_key=api_key,
+            api_key=bound_key(provider, base_url, api_key),
             temperature=args.temperature,
             timeout=getattr(
                 args, "openai_timeout", getattr(args, "ollama_timeout", 300)
@@ -176,7 +177,7 @@ def _build_model_client(args):
         return AnthropicCompatibleModelClient(
             model=model,
             base_url=base_url,
-            api_key=api_key,
+            api_key=bound_key(provider, base_url, api_key),
             temperature=args.temperature,
             timeout=getattr(
                 args, "openai_timeout", getattr(args, "ollama_timeout", 300)
@@ -191,7 +192,7 @@ def _build_model_client(args):
         return AnthropicCompatibleModelClient(
             model=model,
             base_url=base_url,
-            api_key=api_key,
+            api_key=bound_key(provider, base_url, api_key),
             temperature=args.temperature,
             timeout=getattr(
                 args, "openai_timeout", getattr(args, "ollama_timeout", 300)
@@ -202,7 +203,7 @@ def _build_model_client(args):
         )
 
     model = _effective_model(args, provider)
-    host = getattr(args, "host", DEFAULT_OLLAMA_HOST)
+    host = getattr(args, "host", None) or provider_env("PICO_OLLAMA_HOST", default=DEFAULT_OLLAMA_HOST)
     return OllamaModelClient(
         model=model,
         host=host,
@@ -278,7 +279,7 @@ DEFAULT_OPTIONS = {
     "provider": None,
     "model": None,
     "base_url": None,
-    "host": DEFAULT_OLLAMA_HOST,
+    "host": None,
     "temperature": 0.2,
     "top_p": 0.9,
     "ollama_timeout": 300,
@@ -340,6 +341,8 @@ def freeze_options(root, supplied=None):
     model = _build_model_client(SimpleNamespace(**options))
     if hasattr(model, "base_url"):
         options["base_url"] = model.base_url
+    elif hasattr(model, "host"):
+        options["host"] = model.host
     return options, model.protocol
 
 
@@ -468,7 +471,7 @@ class ApplicationService:
             except ApplicationError:
                 raise
             except (ValueError, OSError):
-                raise ApplicationError("configuration_error", "模型配置无效。请检查项目 .env 的提供方、模型、地址及文件格式，再刷新连接。") from None
+                raise ApplicationError("configuration_error", "模型配置无效。请检查 Pico 模型设置；未设置全局配置时，请检查旧项目 .env。") from None
 
         def public_session(session, after=0, limit=0):
             # Raw replay blocks and old checkpoint snapshots stay private; history is paged for display.
@@ -518,7 +521,7 @@ class ApplicationService:
                 "backend_version": "0.1.0",
                 "api_version": 4,
                 "capabilities": ["sessions", "runs", "approvals", "events", "run_reviews",
-                                 "verification_evidence", "query_cursors", "configuration_summary", "desktop_control", "idle_upgrade"],
+                                 "verification_evidence", "query_cursors", "configuration_summary", "desktop_control", "idle_upgrade", "global_model_settings"],
                 "instance_id": self.manager.instance_id,
                 "workspace": str(self.store.root),
                 "status": "stopping"

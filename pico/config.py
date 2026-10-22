@@ -1,4 +1,4 @@
-"""Project-local configuration helpers."""
+"""Pico model defaults and compatible project-local environment loading."""
 
 import os
 import re
@@ -41,16 +41,18 @@ def find_project_env(start):
 
 
 def load_project_env(start, override=True):
-    env_path = find_project_env(start)
-    if env_path is None:
-        return {}
-    loaded = {}
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        parsed = _parse_env_line(line)
-        if parsed is None:
-            continue
-        name, value = parsed
-        loaded[name] = value
+    from .settings import model_env
+
+    loaded = model_env()
+    # Once Pico owns model configuration, repositories are inputs, not credentials.
+    # Keep project .env compatibility only for users without app-level profiles.
+    env_path = None if loaded else find_project_env(start)
+    if env_path is not None:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            parsed = _parse_env_line(line)
+            if parsed is not None and parsed[0] != 'PICO_CONFIG_DIR':
+                loaded[parsed[0]] = parsed[1]
+    for name, value in loaded.items():
         if override or name not in os.environ:
             os.environ[name] = value
     return loaded

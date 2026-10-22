@@ -12,7 +12,7 @@ test('live DeepSeek desktop approval, reopen, frozen review and cancellation', a
   const portable = await portableApp();
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-live-desktop-'));
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'pico-live-profile-'));
-  const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(), TMPDIR: os.tmpdir() };
+  const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(), TMPDIR: os.tmpdir(), PICO_CONFIG_DIR: path.join(profile, 'settings') };
   const python = path.join(portable.bundle, 'Contents/Resources/backend/python/bin/python3');
   const query = (method: string, params = {}) => JSON.parse(execFileSync(python, ['-I', '-B', '-c',
     'import json,sys;from pico.host_client import HostClient;print(json.dumps(HostClient(sys.argv[1]).call(sys.argv[2],json.loads(sys.argv[3]))))',
@@ -22,9 +22,10 @@ test('live DeepSeek desktop approval, reopen, frozen review and cancellation', a
   let runId: string | undefined;
   const launch = () => electron.launch({ executablePath: path.join(portable.bundle, 'Contents/MacOS/Pico'), args: [`--user-data-dir=${profile}`], cwd: root, env });
   try {
-    // Exercise normal project .env discovery with Finder-like environment; never log credentials.
-    await fs.copyFile(path.join(path.resolve(process.env.PICO_LIVE_ENV ?? '..'), '.env'), path.join(root, '.env'));
-    await fs.chmod(path.join(root, '.env'), 0o600);
+    // Import once into Pico, then exercise a project containing no credentials.
+    const imported = JSON.parse(execFileSync(python, ['-I', '-B', '-m', 'pico.settings', 'import', '--file',
+      path.join(path.resolve(process.env.PICO_LIVE_ENV ?? '..'), '.env')], { env, encoding: 'utf8' }));
+    expect(imported.profiles.deepseek.api_key_configured).toBe(true);
     await fs.writeFile(path.join(root, '.gitignore'), '.env\n.pico/\n');
     await fs.writeFile(path.join(root, 'sample.txt'), 'user header\nvalue = "beta"\n');
     await fs.writeFile(path.join(root, 'verify.sh'), '#!/bin/sh\ngrep -Fx \'value = "beta-native"\' sample.txt\n');
@@ -84,7 +85,7 @@ test('live DeepSeek desktop approval, reopen, frozen review and cancellation', a
     const cancelled = query('runs.checks', { run_id: runId }).items;
     expect(cancelled[0]).toMatchObject({ status: 'cancelled', cancelled: true });
     await fs.writeFile('test-results/live-deepseek.json', JSON.stringify({ status: 'passed', provider: configuration.provider,
-      model: configuration.model, endpoint: configuration.endpoint, actual_network: true, fixture: false, packaged: true,
+      model: configuration.model, endpoint: configuration.endpoint, actual_network: true, fixture: false, packaged: true, global_model_settings: true, project_dotenv: false,
       workflow_run: workflowId, cancelled_run: runId, approvals: 3, reopened_waiting_run: true,
       dirty_worktree_and_index_preserved: true, frozen_review: 'ready', command: checks[0].command, exit_code: checks[0].exit_code,
       verification_status: checks[0].status, cancelled_verification_status: cancelled[0].status, continued_same_session: true }, null, 2));

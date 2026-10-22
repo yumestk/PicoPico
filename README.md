@@ -85,10 +85,11 @@ python -m pico
 
 ## 模型后端
 
-Pico 启动时会读取项目根目录的 `.env`。本地真实 key 放在 `.env`，仓库只保留 `.env.example`。配置优先级是：
+桌面推荐先配置一次“Pico 模型设置”，所有项目共用。CLI 也读取同一应用级设置。未启用应用级配置时继续读取项目 `.env`；仓库只保留 `.env.example`。配置优先级是：
 
 ```text
-显式 CLI 参数 > .env 里的 PICO_* 变量 > 旧环境变量 > 代码默认值
+显式 CLI 参数/会话设置 > Pico 应用级设置 > 环境变量 > 代码默认值
+未启用应用级设置时：显式参数 > 项目 .env > 环境变量 > 代码默认值
 ```
 
 Provider 选择的具体顺序是：
@@ -99,7 +100,7 @@ Provider 选择的具体顺序是：
 
 不传 `--provider` 且没有 `PICO_PROVIDER` 时默认使用 `deepseek`。这是推荐配置路径：DeepSeek 的 Anthropic-compatible endpoint 比本地 Ollama 更少依赖本机模型环境，也比 OpenAI-compatible/Anthropic-compatible 代理少一层默认 gateway 假设。其他 provider 仍然保留，可以在 `.env` 里写 `PICO_PROVIDER=openai`、`PICO_PROVIDER=anthropic`、`PICO_PROVIDER=ollama`，也可以显式传 `--provider openai`、`--provider anthropic` 或 `--provider ollama`。
 
-`.env` 会在构建 provider client 前加载，并覆盖当前进程里的同名环境变量。模型名和 base URL 可以通过 `--model`、`--base-url` 临时覆盖；API key 只从环境变量读取。
+应用级配置优先用于模型 client；没有应用级配置时才加载项目 `.env` 并覆盖同名环境变量。模型名可用 `--model` 临时覆盖。`--base-url` 指向不同地址时不会复用全局密钥，应为该服务单独配置凭据。
 
 本地第一次配置：
 
@@ -174,7 +175,7 @@ Host 异常退出后，原来未结束的运行标记为 interrupted，不自动
 
 桌面端可选择/恢复最近工作区，创建会话、提交任务、查看工具活动、批准或拒绝操作并取消运行。CLI 与桌面操作同一个 Host/Run；关闭窗口和退出应用都只断连，后台任务继续，重开后从工作区数据库恢复。
 
-新会话设置可选择 provider、模型及审批模式；已存在会话显示其冻结配置，改变原生协议时应新建会话。本次审批模式只影响新提交的任务。连接说明显示脱敏 endpoint 与密钥是否配置，密钥仍在项目 `.env`，桌面不提供密钥编辑。
+先在左侧“Pico 模型设置”配置提供方、模型、服务地址与 API key，或从已有 `.env` 一次导入。之后选择任意项目即可读取文件、提问和执行任务，不需要给每个项目配置密钥。新会话设置可单独选择 provider、模型及审批模式；已有会话保留创建时的模型，修改 Pico 默认模型后请新建会话。
 
 发送前持久化请求 ID 和待确认请求，快速重复点击只有一个任务；回执丢失时重开应用可“重试确认同一次发送”，复用原 ID。明确拒绝受理的配置/阻塞错误允许修正后重新发送；传输结果未知时不会自动创建新任务。其他非终态任务存在时，新输入明确加入 Host 队列。审批提交后等待 Host 确认，取消也要等待真实终态；中断或结果未知会提示先检查工作区。
 
@@ -194,7 +195,7 @@ npm test
 npm run package
 ```
 
-产物为 `desktop/out/Pico-darwin-arm64/Pico.app`，可用 Finder 打开。包内带有经过 SHA256 校验的 CPython；运行不依赖系统 Python、uv、项目虚拟环境或开发服务器。目标仓库使用的 Git、测试框架等开发工具仍需自行安装，模型配置仍读取该仓库的 `.env`。
+产物为 `desktop/out/Pico-darwin-arm64/Pico.app`，可用 Finder 打开。包内带有经过 SHA256 校验的 CPython；运行不依赖系统 Python、uv、项目虚拟环境或开发服务器。目标仓库使用的 Git、测试框架等开发工具仍需自行安装。模型默认使用 Pico 应用级设置；选择的项目只决定文件与执行范围。
 
 首版仅支持 macOS arm64 的本地内部试用，尚未签名公证。桌面“修改与验证”面板提供冻结 Diff、开始前已有修改、验证命令与范围说明；“刷新当前漂移”单独观察当前文件，不覆盖历史。宽窗口并排审查，窄窗口切换对话与审查，工具卡片可跳到相关文件或检查；Diff、文件列表和检查记录均分页读取。构建下载发生在打包阶段，Python 的来源与校验值见 `desktop/python-runtime.json`。运行 `npm run test:electron` 可验收真实打包窗口、CLI 交叉控制、回执丢失与退出恢复、跨工作区隔离、版本不兼容路径，以及脏工作树审查、失败/未知/取消、分页与中文输入法；模型请求使用本地原生 HTTP fixture，不等同于 live 效果验收。
 
@@ -215,9 +216,13 @@ npm run test:electron
 PICO_LIVE_PROVIDER=deepseek npm run test:electron -- live.spec.ts
 ```
 
-该测试会产生真实 API 请求及相应费用，读取上级项目的 `.env`；也可用 `PICO_LIVE_ENV=/absolute/config-directory` 指定含 `.env` 的目录。测试只在临时 Git 仓库执行，临时配置权限为 0600，结束后删除；验证桌面提交、审批、退出重开、保留已有修改、Diff/检查与同会话取消，不修改源仓库。`PICO_TEST_APP=/absolute/Pico.app` 可选择移动后的待验收应用，默认使用上述本地打包输出。截图与 JSON 留在 `desktop/test-results/`，不进入 Git。
+该测试会产生真实 API 请求及相应费用，把上级项目 `.env` 中的模型字段一次导入临时 Pico 配置；也可用 `PICO_LIVE_ENV=/absolute/config-directory` 指定导入目录。测试只在不含密钥的临时 Git 仓库执行，Pico 配置权限为 0600，结束后删除；验证桌面提交、审批、退出重开、保留已有修改、Diff/检查与同会话取消，不修改源仓库。`PICO_TEST_APP=/absolute/Pico.app` 可选择移动后的待验收应用，默认使用上述本地打包输出。截图与 JSON 留在 `desktop/test-results/`，不进入 Git。
 
 当前内部验收平台为 macOS arm64。DeepSeek 原生 Messages 桌面流程已通过；OpenAI/Anthropic 的 live 验收缺少密钥，Ollama 的本地服务不可达，均记录为 blocked；三类原生协议另有离线 schema/工具回放回归。固定 12 任务通过；恢复实验成功率仍为 0.9，不作全通过或模型效果承诺。
+
+Pico 模型设置默认保存在 macOS 的 `~/Library/Application Support/Pico/models.json`，是权限 0600 的本机配置文件；没有声称使用钥匙串或磁盘加密。可用进程环境 `PICO_CONFIG_DIR` 指定独立配置目录，CLI 与 Host 也读取这套设置。密钥只写入本机配置，设置查询不回传密钥，桌面密码框留空表示保留；可显式替换或清除。导入只读取模型字段，不导入业务数据库等变量，也不修改源文件。
+
+启用 Pico 全局配置后，项目 `.env` 不参与模型配置，避免项目覆盖服务地址并把应用密钥引向其他服务器。全局密钥绑定保存的服务地址；旧会话固定在其他地址时不会取得新地址的密钥，请新建会话。尚未配置应用级模型的 CLI/旧用户继续兼容项目 `.env`。旧 Host 在全局配置启用后通过原子空闲检查升级，活动任务不会被强停。
 
 ### 运行差异与数据升级
 
@@ -365,7 +370,7 @@ uv run pico runs export <run_id>
 
 显式导出生成 `run_state.json`、`trace.jsonl`、完整的 `tool_results.json` 和已有的 `report.json`。导出失败会单独报告，不改变数据库中的执行结果。
 
-Host 通过当前用户私有的 Unix socket 通信，不监听网络端口。凭据由环境或项目 `.env` 提供，不写入公共 RPC、运行配置快照或进程参数。Host 日志按大小轮转，worker 诊断有界保留。进程组管理不构成对同一用户恶意进程的沙箱。
+Host 通过当前用户私有的 Unix socket 通信，不监听网络端口。凭据来自 Pico 本机模型设置或兼容的环境/项目 `.env`，不写入公共查询响应、运行配置快照或进程参数。Host 日志按大小轮转，worker 诊断有界保留。进程组管理不构成对同一用户恶意进程的沙箱。
 
 ## 开发
 
