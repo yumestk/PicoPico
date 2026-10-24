@@ -10,10 +10,10 @@ export interface Configuration { provider: string; model: string; endpoint: stri
 export interface SessionItem { id: string; created_at: string; provider_protocol: string }
 export interface RunItem { run_id: string; session_id: string; parent_run_id: string; status: string; created_at: string; finished_at?: string }
 export interface Run extends RunItem { last_sequence: number; final_answer: string; stop_reason: string; report?: { unknown_calls?: string[] } }
-export interface Message { message_id: string; message_index: number; role: string; content: string; content_truncated: boolean; tool_calls?: { id: string; name: string }[]; tool_call_count?: number }
+export interface Message { message_id: string; message_index: number; run_id?: string; role: string; content: string; content_truncated: boolean; tool_calls?: { id: string; name: string }[]; tool_call_count?: number }
 export interface Session extends SessionItem { config: Config; history: Message[]; next_message: number; history_count: number; history_revision?: string }
 export interface Config { provider?: string; model?: string; approval?: string }
-export interface ToolCall { run_id: string; call_id: string; call_ref?: string; name: string; phase: string; args?: unknown; result?: { status: string; error_code: string; data?: { purpose?: string }; metadata?: { affected_paths?: string[] } }; details_truncated?: boolean; preview?: string }
+export interface ToolCall { run_id: string; call_id: string; call_ref?: string; name: string; phase: string; args?: unknown; result?: { status: string; error_code: string; data?: { purpose?: string; path?: string; start?: number }; metadata?: { affected_paths?: string[] } }; details_truncated?: boolean; preview?: string }
 export interface CheckSummary { status: string; counts: Record<string, number>; total: number; coverage_assessed: boolean; scope: string }
 export interface Scope { captured_at?: string; complete: boolean; notes: string[]; file_count?: number; content_omissions?: Record<string, number> }
 export interface Review { state: string; reason?: string; parent_run_id?: string; baseline: Scope | null; end: Scope | null; change_count: number; initial_change_count: number; checks: CheckSummary }
@@ -24,10 +24,12 @@ export interface Check { run_id: string; call_id: string; call_ref?: string; com
 export interface Drift { state: string; reason?: string; current_scope?: Scope; version_status?: string; checks?: CheckSummary }
 export interface EvidenceLink { run_id: string; path?: string; call_id?: string; nonce: number }
 export interface Approval { id: string; run_id: string; call_id: string; name: string; args: unknown; status: string; expires_at: string; scope: { cwd: string; path: string }; args_truncated: boolean }
-export interface RunEvent { sequence: number; event_id: string; event: string; name?: string }
+export interface RunEvent { sequence: number; event_id: string; event: string; name?: string; attempt?: number; text?: string; truncated?: boolean }
 export interface Activity { subscription_id: string; handle: string; run_id: string; events: RunEvent[]; next_sequence: number; error?: string }
 export interface Submission { session_id: string; prompt: string; client_request_id: string; config?: Config }
+export interface FilePage { path: string; start: number; end: number; column: number; total_lines: number; next_line: number | null; next_column: number; revision: string; truncated: boolean; text: string; reads?: { start: number; end: number; matches_current: boolean }[] }
 export interface HostMethods {
+  'workspace.file': { params: { path: string; start?: number; end?: number; column?: number; run_id?: string }; result: FilePage };
   'configuration.get': { params: { session_id?: string }; result: Configuration };
   'sessions.list': { params: { cursor: string; limit: number }; result: Page<SessionItem> };
   'sessions.create': { params: { config: Config }; result: Session };
@@ -48,6 +50,8 @@ export interface HostMethods {
 export interface ModelSettings { provider: string; configured: boolean; profiles: Record<string, { model: string; endpoint: string; api_key_configured: boolean }> }
 export interface ModelSettingsInput { provider: string; model: string; endpoint: string; api_key?: string; clear_api_key?: boolean }
 export interface DesktopAPI {
+  writeClipboard(text: string): Promise<void>;
+  openExternal(url: string): Promise<void>;
   modelSettings(): Promise<ModelSettings>;
   saveModelSettings(value: ModelSettingsInput): Promise<ModelSettings>;
   importModelSettings(): Promise<ModelSettings | null>;

@@ -51,7 +51,6 @@ test('configure Pico once, read two projects without project credentials, persis
       await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [root] })) as typeof dialog.showOpenDialog; }, root);
       await window.getByRole('button', { name: i ? '＋ 选择工作区' : '选择文件夹 →', exact: true }).click();
       await expect(window.getByTestId('workspace-path')).toHaveText(await fs.realpath(root));
-      await window.getByRole('button', { name: '新建会话', exact: true }).click();
       await expect(window.locator('.session-heading')).toContainText('deepseek-v4-flash');
       await window.getByLabel('发送任务', { exact: true }).fill('Read README.md and explain this project');
       await window.getByRole('button', { name: '发送任务', exact: true }).click();

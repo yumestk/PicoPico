@@ -54,3 +54,15 @@ class ModelRequest:
 
     def char_count(self):
         return len(self.system) + len(json.dumps(self.messages, ensure_ascii=False)) + len(json.dumps(self.tools, ensure_ascii=False))
+
+
+class ModelRequestError(RuntimeError):
+    def __init__(self, status):
+        self.category = ('authentication' if status in (401, 403) else 'rate_limit' if status == 429
+                         else 'unsupported_model' if status in (400, 404, 422) else 'network' if status == 0 else 'service')
+        messages = {'authentication': '模型认证失败，请检查 Pico 模型设置中的密钥与服务地址。',
+                    'rate_limit': '模型服务限流，请稍后再试。',
+                    'unsupported_model': '模型服务拒绝了请求，请检查模型名称、服务地址和工具调用支持。',
+                    'network': '暂时无法连接模型服务，请检查网络或稍后再试。',
+                    'service': '模型服务暂时异常，请稍后再试。'}
+        super().__init__(messages[self.category] + (f' (HTTP {status})' if status else ''))

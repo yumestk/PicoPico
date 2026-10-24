@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, session } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, session, shell } from 'electron';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile, writeFile, rename } from 'node:fs/promises';
@@ -102,8 +102,10 @@ async function openWorkspace(directory: string, upgrade = false): Promise<Worksp
   if (typeof value.workspace !== 'string' || typeof value.socket !== 'string'
     || !path.isAbsolute(value.workspace) || !path.isAbsolute(value.socket)) throw new Error('Invalid workspace bootstrap');
   const info = await hostInfo(value.socket, value.workspace);
-  if (!upgrade && !info.capabilities?.includes('global_model_settings') && (await modelSettings('status')).configured
-    && info.capabilities?.includes('idle_upgrade')) return openWorkspace(directory, true);
+  if (!upgrade && !info.capabilities?.includes('assistant_preview') && info.capabilities?.includes('idle_upgrade')) {
+    try { return await openWorkspace(directory, true); }
+    catch (error) { if (!String(error).includes('workspace_busy')) throw error; }
+  }
   const known = [...workspaces.entries()].find(([, w]) => w.workspace === value.workspace);
   const handle = known?.[0] ?? randomUUID();
   workspaces.set(handle, { workspace: value.workspace, socket: value.socket });
@@ -117,6 +119,7 @@ async function openWorkspace(directory: string, upgrade = false): Promise<Worksp
 
 // Only application use cases cross the bridge; socket paths, files, private IPC and host.stop do not.
 const methods: Record<string, string[]> = {
+  'workspace.file': ['path', 'start', 'end', 'column', 'run_id'],
   'configuration.get': ['session_id'], 'sessions.list': ['cursor', 'limit'], 'sessions.get': ['session_id', 'after_message', 'limit'],
   'sessions.create': ['config'], 'runs.list': ['cursor', 'limit', 'session_id'], 'runs.get': ['run_id'],
   'runs.start': ['session_id', 'prompt', 'client_request_id', 'config'], 'runs.cancel': ['run_id'],
@@ -139,7 +142,19 @@ else {
       return new Response(content, { headers: { 'Content-Type': types[path.extname(name)] ?? 'application/octet-stream' } });
     });
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    ipcMain.handle('clipboard:write', (event, text: unknown) => {
+      checkSender(event);
+      if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 128 * 1024) throw new Error('Copy exceeds 128 KiB');
+      clipboard.writeText(text);
+    });
     session.defaultSession.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !details.url.startsWith('pico://app/') }));
+    ipcMain.handle('external:open', async (event, raw: unknown) => {
+      checkSender(event);
+      if (typeof raw !== 'string' || raw.length > 4096) throw new Error('Invalid link');
+      const url = new URL(raw);
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid link');
+      await shell.openExternal(url.href);
+    });
     let modelSaving = false;
     ipcMain.handle('models:get', event => { checkSender(event); return modelSettings('status'); });
     ipcMain.handle('models:save', async (event, input: unknown) => {
@@ -211,14 +226,16 @@ else {
         });
       };
       void (async () => {
-        let cursor = after;
+        let cursor = after, checkedAt = 0;
         try {
           while (!signal.aborted) {
             const page = await callHost<{ events: RunEvent[]; next_sequence: number }>(target.socket, target.workspace,
               'runs.events', { run_id: runId, after_sequence: cursor, limit: 50, wait_ms: 10000 }, 15000, signal);
             cursor = page.next_sequence;
             send(page);
+            if (page.events.length && page.events.every(item => item.event === 'assistant_preview') && Date.now() - checkedAt < 1000) continue;
             const run = await callHost<Run>(target.socket, target.workspace, 'runs.get', { run_id: runId }, 5000, signal);
+            checkedAt = Date.now();
             if (['completed', 'stopped', 'failed', 'cancelled', 'interrupted'].includes(run.status) && cursor >= run.last_sequence) break;
           }
         } catch (error) { if (!signal.aborted) send({ error: String(error), next_sequence: cursor }); }

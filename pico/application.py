@@ -6,7 +6,12 @@ import os
 from dataclasses import asdict
 from types import SimpleNamespace
 
-from .config import load_project_env, provider_env
+from .config import (
+    DEFAULT_MAX_NEW_TOKENS,
+    DEFAULT_MAX_STEPS,
+    load_project_env,
+    provider_env,
+)
 from .providers.clients import (
     AnthropicCompatibleModelClient,
     OllamaModelClient,
@@ -285,8 +290,8 @@ DEFAULT_OPTIONS = {
     "ollama_timeout": 300,
     "openai_timeout": 300,
     "approval": "ask",
-    "max_steps": 6,
-    "max_new_tokens": 512,
+    "max_steps": DEFAULT_MAX_STEPS,
+    "max_new_tokens": DEFAULT_MAX_NEW_TOKENS,
     "secret_env_names": [],
     "allowed_tools": None,
 }
@@ -387,6 +392,7 @@ class ApplicationService:
             "host.stop": ({}, {}),
             "host.stop_if_idle": ({}, {}),
             "configuration.get": ({}, {"session_id": str}),
+            "workspace.file": ({"path": str}, {"start": int, "end": int, "column": int, "run_id": str}),
             "sessions.create": ({}, {"config": dict}),
             "sessions.list": ({}, {"limit": int, "cursor": str}),
             "sessions.get": ({"session_id": str}, {"after_message": int, "limit": int}),
@@ -493,7 +499,7 @@ class ApplicationService:
             for index in range(after, min(after + limit, len(session["history"]))):
                 item = redact_artifact(session["history"][index], secret_env_names=self.secret_env_names)
                 content = str(item.get("content", ""))
-                view = {k: item[k] for k in ("role", "name", "call_id", "created_at") if k in item}
+                view = {k: item[k] for k in ("role", "name", "call_id", "created_at", "run_id") if k in item}
                 view.update(message_id=f"{session['id']}:{session.get('history_revision', '')}:{index}", message_index=index,
                             content=content[:16384], content_truncated=len(content) > 16384)
                 if item.get("tool_calls"):
@@ -521,7 +527,7 @@ class ApplicationService:
                 "backend_version": "0.1.0",
                 "api_version": 4,
                 "capabilities": ["sessions", "runs", "approvals", "events", "run_reviews",
-                                 "verification_evidence", "query_cursors", "configuration_summary", "desktop_control", "idle_upgrade", "global_model_settings"],
+                                 "verification_evidence", "query_cursors", "configuration_summary", "desktop_control", "idle_upgrade", "global_model_settings", "file_pages", "assistant_preview"],
                 "instance_id": self.manager.instance_id,
                 "workspace": str(self.store.root),
                 "status": "stopping"
@@ -540,6 +546,23 @@ class ApplicationService:
             self.manager.accepting = False
             self.stopping.set()
             return {"status": "stopping"}
+        if method == "workspace.file":
+            from .file_view import read_page
+            try:
+                page = read_page(self.store.root, params["path"], params.get("start", 1), params.get("end", 200), params.get("column", 0), self.secret_env_names)
+                page['reads'] = []
+                if params.get('run_id'):
+                    self.store.get_run(params['run_id'])
+                    rows = self.store.connection.execute("SELECT result FROM tool_calls WHERE run_id=? AND name='read_file' AND phase='finished' AND json_extract(result,'$.data.path')=? LIMIT 100",
+                                                         (params['run_id'], params['path']))
+                    for row in rows:
+                        result = json.loads(row['result'])
+                        data = result.get('data', {})
+                        if result.get('status') == 'ok' and data.get('revision'):
+                            page['reads'].append({'start': data['start'], 'end': data['end'], 'matches_current': data['revision'] == page['revision']})
+                return self.store.redact(page)
+            except (OSError, ValueError) as exc:
+                raise ApplicationError("file_unavailable", str(exc)) from exc
         if method == "configuration.get":
             overrides = conversation(params["session_id"])["config"] if "session_id" in params else None
             config, _ = resolved_options(overrides)

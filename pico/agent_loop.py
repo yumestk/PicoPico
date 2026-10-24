@@ -34,7 +34,7 @@ class AgentLoop:
             if agent.review is not None:
                 agent.review.finish(cancelled=agent.cancel_event.is_set())
             message = response.message() if response is not None else {'role':'assistant','content':answer}
-            agent.session['history'].append({**message,'created_at':now()})
+            agent.session['history'].append({**message, 'run_id': state.run_id, 'created_at':now()})
             agent.create_checkpoint(state, request, trigger=reason, persist=False)
             report = agent.redact_artifact(agent.build_report(state))
             report['run_duration_ms'] = int((time.monotonic() - started) * 1000)
@@ -98,7 +98,13 @@ class AgentLoop:
                     agent.emit_trace(state, 'checkpoint_created', {'checkpoint_id': checkpoint['checkpoint_id'], 'trigger': trigger})
                 purpose = 'finalization' if finalization else 'action'
                 agent.emit_trace(state, 'model_requested', {'attempts': state.attempts, 'tool_steps': state.tool_steps, 'purpose': purpose})
-                response = agent.model_client.complete(request)
+                if getattr(agent.model_client, 'supports_streaming', False):
+                    from .preview import Preview
+                    preview = Preview(agent, state)
+                    response = agent.model_client.complete(request, on_text=preview.feed)
+                    preview.flush(final=True)
+                else:
+                    response = agent.model_client.complete(request)
                 if agent.cancel_event.is_set():
                     raise KeyboardInterrupt
                 agent.last_completion_metadata = response.metadata
@@ -110,7 +116,10 @@ class AgentLoop:
                         agent.record({**response.message(), 'created_at': now()})
                         for call in response.tool_calls:
                             self._record_result(state, call, ToolExecutionResult(status='rejected', error_code='incomplete_model_response', message=response.finish_reason))
-                    return self._finish(state, user_message, started, response.text or f'Model stopped: {response.finish_reason}', 'model_error')
+                    answer = response.text or f'Model stopped: {response.finish_reason}'
+                    if response.finish_reason == 'length':
+                        answer += '\n\n回答因输出预算耗尽而截断，尚未完成。可以明确发送继续，或在新会话提高预算。'
+                    return self._finish(state, user_message, started, answer, 'model_error')
                 if response.tool_calls:
                     ids = [call.id for call in response.tool_calls]
                     if any(not call_id for call_id in ids) or len(set(ids)) != len(ids) or self._seen_call_ids.intersection(ids):
@@ -155,7 +164,8 @@ class AgentLoop:
             reason = 'persistence_error' if isinstance(exc, OSError) else 'model_error'
             try:
                 agent.emit_trace(state, 'model_failed' if reason == 'model_error' else 'persistence_failed',
-                                 {'error': error, 'completion_metadata': dict(agent.last_completion_metadata)})
+                                 {'error': error, 'error_category': getattr(exc, 'category', 'unknown'),
+                                  'completion_metadata': dict(agent.last_completion_metadata)})
             except OSError:
                 reason = 'persistence_error'
             self._finish(state, user_message, started, f'Run failed: {error}', reason)

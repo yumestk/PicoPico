@@ -125,7 +125,8 @@ def test_batch_budget_rejects_remaining_calls_and_disables_tools(tmp_path):
 def test_truncated_response_never_executes_its_calls(tmp_path):
     agent = build_agent(tmp_path, [ModelResponse(text='partial', finish_reason='length', tool_calls=[
         ToolCall('write_file', {'path': 'bad.txt', 'content': 'bad'})])])
-    assert agent.ask('write') == 'partial'
+    answer = agent.ask('write')
+    assert answer.startswith('partial') and '输出预算耗尽' in answer
     assert agent.current_run_state.status == 'failed'
     assert not (tmp_path / 'bad.txt').exists()
     assert agent.last_completion_metadata['finish_reason'] == 'length'

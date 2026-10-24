@@ -4,9 +4,11 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
-import shutil
-import subprocess
+import hashlib
+import os
+import time
 from functools import partial
+from pathlib import Path
 
 from .command_runner import run_command
 from .workspace import IGNORED_PATH_NAMES
@@ -33,13 +35,13 @@ def integer_schema(default, minimum=1, maximum=None):
 
 
 BASE_TOOL_SPECS = {
-    "list_files": {"schema": object_schema({"path": string_schema(".")}), "risky": False,
-                   "description": "List files in the workspace."},
+    "list_files": {"schema": object_schema({"path": string_schema("."), "offset": integer_schema(0, minimum=0, maximum=10000), "depth": integer_schema(8, maximum=16), "revision": string_schema()}), "risky": False,
+                   "description": "Map project paths recursively (default depth=8); use once to locate source and tests. Results are paged; depth=1 lists immediate children."},
     "read_file": {"schema": object_schema({"path": string_schema(nonempty=True), "start": integer_schema(1),
-                  "end": integer_schema(200)}, ["path"]), "risky": False,
+                  "end": integer_schema(200), "column": integer_schema(0, minimum=0)}, ["path"]), "risky": False,
                   "description": "Read a UTF-8 file by line range."},
     "search": {"schema": object_schema({"pattern": string_schema(nonempty=True), "path": string_schema(".")},
-               ["pattern"]), "risky": False, "description": "Search the workspace."},
+               ["pattern"]), "risky": False, "description": "Search literal text in bounded UTF-8 files (smart case); narrow path or pattern if truncated."},
     "run_shell": {"schema": object_schema({"command": string_schema(nonempty=True),
                   "purpose": {"type": "string", "enum": ["general", "verification"], "default": "general"},
                   "timeout": integer_schema(20, maximum=120)}, ["command"]), "risky": True,
@@ -174,28 +176,54 @@ def tool_list_files(context, args):
     path = context.path(args.get("path", "."))
     if not path.is_dir():
         raise ValueError("path is not a directory")
-    entries = [
-        item for item in sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
-        if item.name not in IGNORED_PATH_NAMES
-    ]
-    lines = []
-    for entry in entries[:200]:
-        kind = "[D]" if entry.is_dir() else "[F]"
-        lines.append(f"{kind} {entry.relative_to(context.root)}")
-    return {"text": "\n".join(lines) or "(empty)", "path": str(path.relative_to(context.root))}
+    from .review import SKIP
+    entries, directories = [], [(path, 1)]
+    depth, deadline, scanned = args.get('depth', 8), time.monotonic() + 5, 0
+    while directories:
+        directory, level = directories.pop()
+        with os.scandir(directory) as iterator:
+            for entry in iterator:
+                scanned += 1
+                if scanned > 10000 or time.monotonic() > deadline:
+                    raise ValueError('Directory map exceeds scan limit; choose a narrower subdirectory or depth')
+                if entry.name in SKIP:
+                    continue
+                is_directory = entry.is_dir(follow_symlinks=False)
+                kind = '[L]' if entry.is_symlink() else '[D]' if is_directory else '[F]'
+                entries.append(f'{kind} {(directory / entry.name).relative_to(context.root)}')
+                if is_directory and level < depth:
+                    directories.append((directory / entry.name, level + 1))
+    entries.sort(key=str.casefold)
+    revision = hashlib.sha256((str(depth) + '\0' + '\0'.join(entries)).encode()).hexdigest()
+    if args.get('revision') and args['revision'] != revision:
+        raise ValueError('Directory changed; restart listing at offset=0')
+    offset = args.get('offset', 0)
+    lines, used = [], 0
+    budget = min(2800, 3800 - len(f'\nReturned 200 of 10000 entries. Continue list_files(path={args.get("path", ".")!r}, depth={depth}, offset=10000, revision={revision!r}).'))
+    for line in entries[offset:offset + 200]:
+        if used + len(line) > budget:
+            if not lines:
+                raise ValueError('Entry path exceeds display limit; choose a shorter subdirectory path')
+            break
+        lines.append(line)
+        used += len(line) + 1
+    next_offset = offset + len(lines)
+    truncated = next_offset < len(entries)
+    footer = f'\nReturned {len(lines)} of {len(entries)} entries (depth <= {depth}).'
+    if truncated:
+        footer += f' Continue list_files(path={args.get("path", ".")!r}, depth={depth}, offset={next_offset}, revision={revision!r}).'
+    return {"text": ("\n".join(lines) or "(empty)") + footer, "path": str(path.relative_to(context.root)),
+            "truncated": truncated, "next_offset": next_offset if truncated else None, "revision": revision}
 
 
 def tool_read_file(context, args):
-    path = context.path(args["path"])
-    if not path.is_file():
-        raise ValueError("path is not a file")
-    start = int(args.get("start", 1))
-    end = int(args.get("end", 200))
-    if start < 1 or end < start:
-        raise ValueError("invalid line range")
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
-    return {"text": f"# {path.relative_to(context.root)}\n{body}", "path": str(path.relative_to(context.root)), "start": start, "end": end}
+    from .file_view import read_page
+
+    context.path(args["path"])  # Validate workspace confinement without resolving away a symlink for the reader.
+    raw = Path(args["path"])
+    relative = raw.relative_to(context.root) if raw.is_absolute() else raw
+    return read_page(context.root, str(relative), args.get("start", 1),
+                     args.get("end", 200), args.get("column", 0), getattr(context, 'secret_env_names', ()))
 
 
 def tool_search(context, args):
@@ -203,31 +231,65 @@ def tool_search(context, args):
     if not pattern:
         raise ValueError("pattern must not be empty")
     path = context.path(args.get("path", "."))
+    if any(part in IGNORED_PATH_NAMES for part in path.relative_to(context.root).parts):
+        raise ValueError('Search path is excluded')
 
-    if shutil.which("rg"):
-        # 优先用 rg，因为搜索会非常频繁，搜索延迟会直接影响 agent 控制循环。
-        result = subprocess.run(
-            ["rg", "-n", "--smart-case", "--max-count", "200", pattern, str(path)],
-            cwd=context.root,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode not in (0, 1):
-            raise ValueError(result.stderr.strip() or "search failed")
-        return {"text": result.stdout.strip() or "(no matches)"}
-
-    matches = []
-    files = [path] if path.is_file() else [
-        item for item in path.rglob("*")
-        if item.is_file() and not any(part in IGNORED_PATH_NAMES for part in item.relative_to(context.root).parts)
-    ]
-    for file_path in files:
-        for number, line in enumerate(file_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-            if pattern.lower() in line.lower():
-                matches.append(f"{file_path.relative_to(context.root)}:{number}:{line}")
-                if len(matches) >= 200:
-                    return {"text": "\n".join(matches), "truncated": True}
-    return {"text": "\n".join(matches) or "(no matches)", "truncated": False}
+    # One bounded implementation also works without rg. Never follow links or read private files.
+    from .file_view import protected_text
+    from .review import SKIP, read_entry
+    case_sensitive = any(c.isupper() for c in pattern)
+    needle = pattern if case_sensitive else pattern.casefold()
+    matches, used, scanned, total_bytes = [], 0, 0, 0
+    truncated, reason = False, ''
+    deadline = time.monotonic() + 5
+    def candidates():
+        nonlocal truncated, reason
+        if path.is_file():
+            yield path
+            return
+        directories, entries = [path], 0
+        while directories:
+            directory = directories.pop()
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    entries += 1
+                    if entries > 10000 or time.monotonic() > deadline:
+                        truncated, reason = True, 'directory scan limit'
+                        return
+                    if entry.name in SKIP or entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        directories.append(directory / entry.name)
+                    elif entry.is_file(follow_symlinks=False):
+                        yield directory / entry.name
+    descriptor = os.open(context.root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for file_path in candidates():
+            scanned += 1
+            if scanned > 500 or total_bytes >= 8 * 1024 * 1024 or time.monotonic() > deadline:
+                truncated, reason = True, 'scan limit'
+                break
+            blobs = []
+            read_entry(descriptor, str(file_path.relative_to(context.root)), lambda data, blobs=blobs: blobs.append(data) or 'search')
+            if not blobs:
+                continue
+            total_bytes += len(blobs[0])
+            for number, line in enumerate(protected_text(blobs[0].decode('utf-8'), getattr(context, 'secret_env_names', ())).splitlines(), 1):
+                if needle in (line if case_sensitive else line.casefold()):
+                    item = f'{file_path.relative_to(context.root)}:{number}:{line}'
+                    if len(matches) >= 200 or used + len(item) > 2800:
+                        truncated, reason = True, 'result limit'
+                        break
+                    matches.append(item)
+                    used += len(item) + 1
+            if truncated:
+                break
+    finally:
+        os.close(descriptor)
+    footer = f'\nSearch scanned {min(scanned, 500)} files (bounded UTF-8 text only, <=512 KiB per file).'
+    if truncated:
+        footer += f' TRUNCATED ({reason}); narrow path or pattern, then search again. This is not an exhaustive result.'
+    return {"text": ("\n".join(matches) or "(no matches)") + footer, "truncated": truncated, "scanned_files": min(scanned, 500)}
 
 
 def tool_run_shell(context, args):

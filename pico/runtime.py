@@ -18,6 +18,7 @@ from . import events
 from . import security as securitylib
 from . import tools as toolkit
 from .checkpoint import CHECKPOINT_NONE_STATUS
+from .config import DEFAULT_MAX_NEW_TOKENS, DEFAULT_MAX_STEPS
 from .context_manager import ContextManager
 from .features import memory as memorylib
 from .prompt_prefix import build_prompt_prefix, tool_signature
@@ -59,8 +60,8 @@ class Pico:
         store,
         session=None,
         approval_policy="ask",
-        max_steps=6,
-        max_new_tokens=512,
+        max_steps=DEFAULT_MAX_STEPS,
+        max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
         depth=0,
         max_depth=1,
         read_only=False,
@@ -574,6 +575,7 @@ class Pico:
             process_started=(lambda pid,token:self.store.process_started(self.current_run_state.run_id,pid,token)) if self.store.managed else None,
             process_stopped=(lambda token:self.store.process_stopped(self.current_run_state.run_id,token)) if self.store.managed else None,
             execution_lock_fd=getattr(self,'execution_lock_fd',None),
+            secret_env_names=tuple(self.secret_env_names),
         )
 
     def spawn_delegate(self, args):

@@ -6,8 +6,10 @@ from dataclasses import dataclass
 
 from .providers.types import ModelProtocolError, ModelRequest
 
-DEFAULT_TOTAL_BUDGET = 12000
-DEFAULT_SECTION_BUDGETS = {"prefix": 3600, "memory": 1600, "relevant_memory": 1200, "history": 5200}
+# A native response may request several tools together. Their complete call/result
+# group must fit without clipping signed replay blocks or dropping tool results.
+DEFAULT_TOTAL_BUDGET = 65536
+DEFAULT_SECTION_BUDGETS = {"prefix": 3600, "memory": 1600, "relevant_memory": 1200, "history": 49152}
 DEFAULT_REDUCTION_ORDER = ("relevant_memory", "history", "memory", "prefix")
 SECTION_ORDER = ("prefix", "memory", "relevant_memory", "history", "current_request")
 RELEVANT_MEMORY_LIMIT = 3
@@ -74,8 +76,6 @@ class ContextManager:
         notes = agent.memory.retrieval_candidates(user_message, limit=3) if memory_on and agent.feature_enabled("relevant_memory") else []
         checkpoint = agent.render_checkpoint_text()
         prefix = agent.prefix + ("\n\n" + checkpoint if checkpoint else "")
-        if not allow_tools:
-            prefix += "\nTool budget exhausted. Summarize evidence without further tools."
         memory = agent.memory_text() if memory_on else "Memory:\n- disabled"
         texts = {"prefix": prefix, "memory": memory}
         budgets = dict(self.section_budgets)
@@ -95,6 +95,13 @@ class ContextManager:
             rendered = {key: _tail_clip(value, budgets[key]) if reduction else value for key, value in texts.items()}
             rendered["relevant_memory"] = relevant.rendered
             system = "\n\n".join(rendered.values())
+            # Execution controls must survive optional prefix/checkpoint clipping.
+            state = getattr(agent, 'current_run_state', None)
+            remaining = max(0, agent.max_steps - (state.tool_steps if state else 0))
+            if allow_tools:
+                system += f'\n\nTool calls remaining in this run: {remaining}. Prioritize the requested evidence and then answer; keep each batch small.'
+            else:
+                system += '\n\nTool budget exhausted. Summarize evidence without further tools. Return a final answer now, state unread or unverified parts, and do not emit tool calls or tool-call markup.'
             selected = set(required)
             selected_chars = sum(len(json.dumps(groups[i], ensure_ascii=False)) for i in selected)
             for i in reversed(range(len(groups))):
@@ -103,6 +110,12 @@ class ContextManager:
                     selected.add(i)
                     selected_chars += size
             messages = [m for i, group in enumerate(groups) if i in selected for m in group]
+            if not allow_tools:
+                # End a tool-result turn explicitly. Some compatible providers
+                # otherwise continue planning tools even with tool_choice=none.
+                messages.append({'role': 'user', 'content':
+                    'Runtime control: tool execution has ended for this run. Answer the original request now using the evidence already returned. '
+                    'Do not request more files or output tool-call markup. Describe missing evidence briefly. Original request: ' + user_message})
             request = ModelRequest(system, messages, tools, agent.max_new_tokens, agent.prefix_state.hash)
             if not reduction or request.char_count() <= self.total_budget:
                 break

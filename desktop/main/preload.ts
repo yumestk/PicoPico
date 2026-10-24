@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { Activity, DesktopAPI } from '../shared';
 
 const api: DesktopAPI = {
+  writeClipboard: text => ipcRenderer.invoke('clipboard:write', text),
+  openExternal: url => ipcRenderer.invoke('external:open', url),
   modelSettings: () => ipcRenderer.invoke('models:get'),
   saveModelSettings: value => ipcRenderer.invoke('models:save', value),
   importModelSettings: () => ipcRenderer.invoke('models:import'),

@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DEFAULT_MAX_STEPS = 12
+DEFAULT_MAX_NEW_TOKENS = 2048
 
 
 def _strip_quotes(value):

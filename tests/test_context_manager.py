@@ -65,6 +65,26 @@ def test_required_round_too_large_fails_instead_of_truncating(tmp_path):
     assert agent.session["history"] == before
 
 
+def test_default_context_keeps_batched_reads_and_following_evidence(tmp_path):
+    agent = build_agent(tmp_path, [])
+    agent.record({"role": "user", "content": "explain entry and tests"})
+    calls = [ToolCall("read_file", {"path": f"source{i}.py"}, f"read_{i}") for i in range(9)]
+    agent.record(ModelResponse(tool_calls=calls, provider_blocks=[
+        {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}
+        for call in calls]).message())
+    for call in calls:
+        agent.record({"role": "tool", "call_id": call.id, "name": call.name, "content": "source evidence " * 180})
+    # A later tool round must not erase the implementation just read in a batch.
+    for message in tool_round(500):
+        agent.record(message)
+    before = copy.deepcopy(agent.session["history"])
+    req, meta = ContextManager(agent).build("explain entry and tests")
+    assert len([m for m in req.messages if m["role"] == "tool"]) == 10
+    assert req.char_count() <= meta["prompt_budget_chars"] == 65536
+    assert message_groups(req.messages)
+    assert agent.session["history"] == before
+
+
 def test_schema_and_current_request_are_in_the_budget(tmp_path):
     agent = build_agent(tmp_path, [])
     with pytest.raises(ContextBudgetError):
@@ -104,6 +124,17 @@ def test_finalization_removes_tool_schemas(tmp_path):
     agent = build_agent(tmp_path, [])
     req, _ = ContextManager(agent).build("summarize", allow_tools=False)
     assert req.tools == []
+
+
+def test_finalization_control_survives_optional_prefix_clipping(tmp_path):
+    agent = build_agent(tmp_path, [])
+    agent.prefix = 'optional context ' * 1000
+    req, _ = ContextManager(agent, section_budgets={"prefix": 100}).build("summarize", allow_tools=False)
+    assert req.tools == []
+    assert req.system.endswith('do not emit tool calls or tool-call markup.')
+    assert 'Tool budget exhausted' in req.system
+    assert req.messages[-1]['content'].startswith('Runtime control:')
+    assert req.messages[-1]['content'].endswith('Original request: summarize')
 
 
 def test_context_manager_relevant_memory_can_mix_durable_notes(tmp_path):

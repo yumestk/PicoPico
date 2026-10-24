@@ -17,6 +17,7 @@ class ToolContext:
     process_started: object = None
     process_stopped: object = None
     execution_lock_fd: object = None
+    secret_env_names: tuple = ()
 
     def path(self, raw_path):
         return self.path_resolver(str(raw_path))

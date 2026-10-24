@@ -50,7 +50,6 @@ test('native workflow reopens to frozen dirty-worktree Diff, checks, tool links 
     await expect(window.getByRole('heading', { name: '从一个工作区开始。' })).toBeVisible();
     await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [root] })) as typeof dialog.showOpenDialog; }, root);
     await window.getByRole('button', { name: '选择文件夹 →' }).click();
-    await window.getByRole('button', { name: '新建会话', exact: true }).click();
     const prompt = window.getByLabel('发送任务', { exact: true });
     await prompt.fill('保留已有改动，添加实现并执行验证');
     await prompt.dispatchEvent('compositionstart');
@@ -71,6 +70,7 @@ test('native workflow reopens to frozen dirty-worktree Diff, checks, tool links 
     await expect(window.getByTestId('approval-card')).toContainText('verification');
     await window.getByRole('button', { name: '批准', exact: true }).click();
     await expect(window.getByTestId('run-status')).toHaveText('已完成');
+    await window.getByRole('button', { name: '修改与验证', exact: true }).click();
     const panel = window.getByTestId('review-panel');
     await expect(panel.getByTestId('review-state')).toHaveText('冻结审查已就绪');
     await panel.getByLabel('文件范围').selectOption('initial');
@@ -100,6 +100,7 @@ test('native workflow reopens to frozen dirty-worktree Diff, checks, tool links 
     await expect.poll(() => diff.textContent()).not.toBe(first);
     await panel.getByRole('button', { name: '上一段 Diff' }).click();
     await expect(diff).toHaveText(first!);
+    await window.locator('.tool-records > summary').click();
     const tool = window.locator('[data-call-id="review-check"]');
     await tool.locator('summary').click();
     await tool.getByRole('button', { name: '查看检查记录' }).click();
@@ -192,6 +193,7 @@ asyncio.run(Host(sys.argv[1],test_script=[]).serve())`, root], { env, stdio: 'ig
     await expect(window.getByRole('heading', { name: '从一个工作区开始。' })).toBeVisible();
     await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [root] })) as typeof dialog.showOpenDialog; }, root);
     await window.getByRole('button', { name: '选择文件夹 →' }).click();
+    await window.getByRole('button', { name: '修改与验证', exact: true }).click();
     const panel = window.getByTestId('review-panel');
     const start = async (kind: string, done = true) => {
       const run = query('runs.start', { session_id: session.id, prompt: kind, client_request_id: kind });

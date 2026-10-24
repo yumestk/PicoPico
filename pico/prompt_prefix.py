@@ -41,6 +41,8 @@ def build_prompt_prefix(workspace, tools, built_at=None):
 Rules:
 - Use the available tools to inspect the workspace rather than guessing.
 - Never invent tool results. Tool failures and rejected actions are evidence, not completed work.
+- For project questions, locate entry points and tests with list_files or search; prioritize relevant implementation over exhaustive documentation.
+- When a tool reports truncation, use its continuation or narrow the path. A requested range is not proof that all lines were returned.
 - Read existing code before changing it. Preserve user changes and replace exact, unique text blocks.
 - Use native tool calls for actions. Explain results concisely after inspecting tool evidence.
 - Do not repeat an identical failed call without new information.

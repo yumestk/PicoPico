@@ -59,7 +59,6 @@ asyncio.run(Host(sys.argv[1]).serve())`, root], { env, stdio: 'ignore' });
     await expect(window.getByRole('heading', { name: '从一个工作区开始。' })).toBeVisible();
     await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [root] })) as typeof dialog.showOpenDialog; }, root);
     await window.getByRole('button', { name: '选择文件夹 →' }).click();
-    await window.getByRole('button', { name: '新建会话', exact: true }).click();
     await expect(window.getByLabel('发送任务', { exact: true })).toBeVisible();
     await window.getByLabel('发送任务', { exact: true }).fill('desktop check');
     // Two synchronous submissions cannot mint two intents before React rerenders.
@@ -83,7 +82,8 @@ asyncio.run(Host(sys.argv[1]).serve())`, root], { env, stdio: 'ignore' });
     const approval = query('approvals.list')[0];
     expect(JSON.parse(cli('approvals', 'approve', approval.id)).decision).toBe(1);
     await expect(window.getByTestId('run-status')).toHaveText('已完成');
-    await expect(window.getByText(`原生任务已完成。${malicious}`, { exact: true })).toHaveCount(1);
+    await expect(window.locator('.message.assistant').last()).toContainText('原生任务已完成。');
+    expect(await window.locator('.message.assistant img').count()).toBe(0);
     expect(await fs.readFile(path.join(root, 'desktop-proof'), 'utf8')).toBe('desktop');
     expect(await window.evaluate(() => (globalThis as { __attack?: number }).__attack)).toBeUndefined();
     expect(window.url()).toBe('pico://app/index.html');
@@ -110,7 +110,7 @@ asyncio.run(Host(sys.argv[1]).serve())`, root], { env, stdio: 'ignore' });
     await window.screenshot({ path: 'test-results/controls.png' });
     await fs.writeFile('test-results/controls.json', JSON.stringify({ nativeRequests, desktop_submit_cli_approve: true,
       cli_submit_desktop_cancel: true, lost_ack_same_run: original, duplicate_submit_count: runs.length,
-      close_and_quit_recovered: true, literal_model_html: true, approval_denied_without_effect: true, packaged: true }, null, 2));
+      close_and_quit_recovered: true, raw_model_html_disabled: true, approval_denied_without_effect: true, packaged: true }, null, 2));
   } finally {
     await application?.close().catch(() => {});
     try { query('host.stop'); } catch { /* Already stopped. */ }
@@ -206,8 +206,9 @@ with Path(sys.argv[1],'.pico/execution.lock').open('a+') as lock:
     }
     lease.kill('SIGTERM');
     await expect.poll(() => query(roots[1], 'host.info').status).toBe('ready');
+    await window.locator('.diagnostics').evaluate(el => { (el as HTMLDetailsElement).open = true; });
     await window.getByRole('button', { name: '刷新连接', exact: true }).click();
-    await expect(window.getByText('已连接', { exact: true })).toBeVisible();
+    await expect(window.getByText('本地服务已连接', { exact: true })).toBeVisible();
     await expect(window.getByText('ROOT-B-000', { exact: true })).toBeVisible();
     // Renderer reload rebuilds authoritative state, not a second persisted run store.
     await window.reload();
@@ -215,10 +216,12 @@ with Path(sys.argv[1],'.pico/execution.lock').open('a+') as lock:
     await expect(window.getByText('ROOT-B-000', { exact: true })).toBeVisible();
     await expect(window.locator('[data-message-id]')).toHaveCount(30);
     await fs.writeFile(path.join(roots[1], '.env'), 'PICO_PROVIDER=invalid-private-config-value\n');
+    await window.locator('.diagnostics').evaluate(el => { (el as HTMLDetailsElement).open = true; });
     await window.getByRole('button', { name: '刷新连接', exact: true }).click();
     await expect(window.getByRole('alert').filter({ hasText: 'configuration_error' })).toBeVisible();
     await expect(window.getByText('连接已中断，正在重连。', { exact: false })).toHaveCount(0);
     await fs.writeFile(path.join(roots[1], '.env'), 'PICO_PROVIDER=ollama\n');
+    await window.locator('.diagnostics').evaluate(el => { (el as HTMLDetailsElement).open = true; });
     await window.getByRole('button', { name: '刷新连接', exact: true }).click();
     await expect(window.getByText('ROOT-B-000', { exact: true })).toBeVisible();
     const previousHost = query(roots[1], 'host.info').instance_id;
@@ -275,6 +278,7 @@ asyncio.run(Host(sys.argv[1],test_script=[ModelResponse(tool_calls=[ToolCall('wr
     await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [root] })) as typeof dialog.showOpenDialog; }, root);
     await window.getByRole('button', { name: '选择文件夹 →' }).click();
     await expect(window.getByRole('heading', { name: '需要升级工作区 Host' })).toBeVisible();
+    await window.locator('.diagnostics > summary').click();
     await window.getByRole('button', { name: '升级空闲 Host' }).click();
     await expect(window.getByRole('alert')).toContainText('manual_upgrade_required');
     expect(query('runs.get', { run_id: run.run_id }).status).toBe('waiting_approval');
@@ -285,6 +289,7 @@ asyncio.run(Host(sys.argv[1],test_script=[ModelResponse(tool_calls=[ToolCall('wr
     await expect.poll(() => query('runs.get', { run_id: run.run_id }).status).toBe('cancelled');
     query('host.stop');
     await new Promise<void>(resolve => { if (host.exitCode !== null) resolve(); else host.once('exit', () => resolve()); });
+    await window.locator('.diagnostics').evaluate(el => { (el as HTMLDetailsElement).open = true; });
     await window.getByRole('button', { name: '刷新连接', exact: true }).click();
     await expect(window.getByRole('heading', { name: '需要升级工作区 Host' })).toHaveCount(0);
     await expect(window.getByTestId('run-status')).toHaveText('已取消');

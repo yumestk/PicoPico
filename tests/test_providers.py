@@ -43,7 +43,7 @@ class Response:
         return self
     def __exit__(self, *_):
         return False
-    def read(self):
+    def read(self, *_):
         return json.dumps(self.value).encode()
 
 
@@ -120,7 +120,7 @@ def test_responses_complete_sse_preserves_tool_calls():
     value = payload('responses', calls=True)
     raw = ('data: ' + json.dumps({'type': 'response.completed', 'response': value}) + '\n\ndata: [DONE]\n').encode()
     with patch('urllib.request.urlopen', return_value=Response(None)) as post:
-        post.return_value.read = lambda: raw
+        post.return_value.read = lambda *_: raw
         assert len(client('responses').complete(request()).tool_calls) == 2
 
 

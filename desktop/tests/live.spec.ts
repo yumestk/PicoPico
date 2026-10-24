@@ -63,6 +63,7 @@ test('live DeepSeek desktop approval, reopen, frozen review and cancellation', a
     await expect(window.getByTestId('run-status')).toHaveText('已完成', { timeout: 70000 });
     expect(await fs.readFile(path.join(root, 'sample.txt'), 'utf8')).toBe('user header\nvalue = "beta-native"\nkeep existing edit\n');
     expect(await fs.readFile(path.join(root, '.git/index'))).toEqual(index);
+    await window.getByRole('button', { name: '修改与验证', exact: true }).click();
     const review = window.getByTestId('review-panel');
     await expect(review.getByTestId('frozen-checks')).toContainText('已记录命令成功');
     await expect(review.getByLabel('冻结 Diff 文本')).toContainText('+value = "beta-native"');

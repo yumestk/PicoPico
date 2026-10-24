@@ -4,12 +4,14 @@ import { compatible, type Approval, type Config, type Configuration, type Deskto
   type EvidenceLink, type RecentWorkspace, type Run, type RunItem, type Session, type SessionItem, type Submission, type ToolCall, type Workspace } from '../shared';
 import { ReviewPanel } from './review';
 import { Settings } from './settings';
+import { Answer } from './answer';
+import { FileReader } from './file';
 import './style.css';
 
 declare global { interface Window { pico: DesktopAPI } }
 const api = window.pico;
 const terminal = (status: string) => ['completed', 'stopped', 'failed', 'cancelled', 'interrupted'].includes(status);
-const statusText: Record<string, string> = { queued: '排队中', running: '运行中', waiting_approval: '等待审批', cancelling: '正在取消', completed: '已完成', stopped: '已停止', failed: '失败', cancelled: '已取消', interrupted: '运行中断', blocked: '工作区已阻塞', ready: '已连接' };
+const statusText: Record<string, string> = { queued: '排队中', running: '运行中', waiting_approval: '等待审批', cancelling: '正在取消', completed: '已完成', stopped: '已停止', failed: '失败', cancelled: '已取消', interrupted: '运行中断', blocked: '工作区已阻塞', ready: '本地服务已连接' };
 const textError = (reason: unknown) => reason instanceof Error ? reason.message : String(reason);
 const connectionFailure = (reason: unknown) => /ECONN|ENOENT|EPIPE|Host disconnected|Host request timed out|Host response|persistence_error/.test(textError(reason));
 function merge<T>(old: T[], incoming: T[], id: (item: T) => string) { return [...new Map([...old, ...incoming].map(v => [id(v), v])).values()]; }
@@ -59,8 +61,8 @@ function App() {
     <main><header><div><strong>{workspace?.workspace.split('/').at(-1) ?? '工作区'}</strong>
       {workspace && <span className="path" data-testid="workspace-path">{workspace.workspace}</span>}</div>
       <div className="header-actions">{workspace && <><span className="badge">{disconnected ? '连接中断' : statusText[workspace.info.status] ?? workspace.info.status}</span>
-        <button disabled={busy} onClick={() => void connect('refresh')}>{busy ? '重连中…' : '刷新连接'}</button>
-        <button disabled={busy} onClick={() => void connect('upgrade')}>升级空闲 Host</button></>}</div></header>
+        <details className="diagnostics"><summary>连接与诊断</summary><button disabled={busy} onClick={() => void connect('refresh')}>{busy ? '重连中…' : '刷新连接'}</button>
+        <button disabled={busy} onClick={() => void connect('upgrade')}>升级空闲 Host</button><p>{workspace.info.protocol} · Host {workspace.info.backend_version} · API {workspace.info.api_version}</p></details></>}</div></header>
       {error && <p role="alert" className="error">{error}</p>}
       {disconnected && <p role="status" className="notice">连接已中断，正在重连。已提交的任务仍以 Host 记录为准。</p>}
       {!workspace ? <section className="welcome"><div className="eyebrow">A LITTLE ROOM TO BUILD</div><h1>从一个工作区开始。</h1>
@@ -70,7 +72,7 @@ function App() {
           <p>先完成活动任务。支持原子空闲升级的 Host 可使用上方按钮；更早版本请在 CLI 停止 Host 后刷新连接。</p>
           <code>pico --cwd {'"' + workspace.workspace + '"'} host stop</code></section>
           : <WorkspaceView key={`${workspace.handle}:${workspace.info.instance_id}:${epoch}`} workspace={workspace} onDisconnect={() => setDisconnected(true)} />}
-      {workspace && <footer><span>{workspace.info.protocol}</span><span>Host {workspace.info.backend_version} · API {workspace.info.api_version}</span></footer>}
+
     </main>{settingsOpen && <Settings onClose={() => setSettingsOpen(false)} onSaved={() => {
       setSettingsOpen(false); if (workspace) void connect('refresh');
     }} />}</div>;
@@ -105,9 +107,16 @@ function WorkspaceView({ workspace, onDisconnect }: { workspace: Workspace; onDi
         setSessions(old => merge(page.items, old.filter(s => !page.items.some(n => n.id === s.id)), s => s.id));
         if (!expanded.current) setCursor(page.next_cursor);
         setConfig(summary); setError('');
-        if (!selected.current && page.items.length) {
+        if (!selected.current) {
           const saved = pendingFor(workspace)?.session_id || workspace.selection?.session_id;
-          selected.current = saved || page.items[0].id; setSessionId(selected.current);
+          let restored = saved && page.items.some(s => s.id === saved);
+          if (saved && !restored) {
+            try { await api.request(workspace.handle, 'sessions.get', { session_id: saved, after_message: 0, limit: 1 }); restored = true; }
+            catch (reason) { if (!/not_found:/.test(textError(reason))) throw reason; }
+          }
+          if (!alive.current || selected.current) return;
+          if (restored || page.items.length) { selected.current = restored ? saved! : page.items[0].id; setSessionId(selected.current); }
+          else if (!creating.current) void createSession();
         }
       } catch (reason) { if (alive.current) { setError(textError(reason)); if (connectionFailure(reason)) onDisconnect(); } }
       finally { inFlight = false; }
@@ -123,9 +132,9 @@ function WorkspaceView({ workspace, onDisconnect }: { workspace: Workspace; onDi
     } catch (reason) { if (alive.current) setError(textError(reason)); }
     finally { if (alive.current) setBusy(false); }
   }
-  async function createSession() {
+  async function createSession(useDefaults = false) {
     if (creating.current) return; creating.current = true; setBusy(true); setError('');
-    const config: Config = { approval, ...(provider ? { provider } : {}), ...(model.trim() ? { model: model.trim() } : {}) };
+    const config: Config = { approval, ...(!useDefaults && provider ? { provider } : {}), ...(!useDefaults && model.trim() ? { model: model.trim() } : {}) };
     try { const session = await api.request(workspace.handle, 'sessions.create', { config });
       if (alive.current) { setSessions(old => [session, ...old]); chooseSession(session.id); }
     } catch (reason) { if (alive.current) setError(textError(reason)); }
@@ -141,18 +150,24 @@ function WorkspaceView({ workspace, onDisconnect }: { workspace: Workspace; onDi
     {cursor && <button disabled={busy || sessions.length >= 200} onClick={() => void more()}>更多会话</button>}
     {!sessions.length && <p className="muted">新建会话，开始第一个任务。</p>}
     {error && <p role="alert" className="error">{error}</p>}</aside>
-    {sessionId ? <SessionView key={sessionId} workspace={workspace} sessionId={sessionId} onDisconnect={onDisconnect} />
+    {sessionId ? <SessionView key={sessionId} workspace={workspace} sessionId={sessionId} defaults={config} onNewSession={() => void createSession(true)} onDisconnect={onDisconnect} />
       : <section className="welcome"><h1>准备开始。</h1><p>会话与运行记录保存在当前工作区。</p></section>}</div>;
 }
 
-function SessionView({ workspace, sessionId, onDisconnect }: { workspace: Workspace; sessionId: string; onDisconnect: () => void }) {
+function SessionView({ workspace, sessionId, defaults, onNewSession, onDisconnect }: { workspace: Workspace; sessionId: string; defaults: Configuration | null; onNewSession: () => void; onDisconnect: () => void }) {
   const [session, setSession] = useState<Session | null>(null);
   const [config, setConfig] = useState<Configuration | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [runs, setRuns] = useState<RunItem[]>([]);
   const [runCursor, setRunCursor] = useState<string | null>('');
   const [runId, setRunId] = useState('');
-  const [prompt, setPrompt] = useState('');
+  const draftKey = `pico:draft:${workspace.workspace}:${sessionId}`;
+  const [prompt, setPrompt] = useState(() => localStorage.getItem(draftKey) || '');
+  useEffect(() => { try { localStorage.setItem(draftKey, prompt); } catch { /* Editing remains available when local storage is full. */ } }, [draftKey, prompt]);
+  const [file, setFile] = useState<{ path: string; line: number; nonce: number } | null>(null);
+  const scroll = useRef<HTMLDivElement>(null), follow = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+  function openFile(path: string, line: number) { setFile({ path, line, nonce: Date.now() }); setView('review'); }
   const [approval, setApproval] = useState('ask');
   const [pending, setPending] = useState<Submission | null>(() => pendingFor(workspace));
   const [sending, setSending] = useState(false);
@@ -246,27 +261,31 @@ function SessionView({ workspace, sessionId, onDisconnect }: { workspace: Worksp
       if (alive.current) setSubmissionError(textError(reason));
     } finally { sendLock.current = false; if (alive.current) setSending(false); }
   }
+  useEffect(() => { if (follow.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [messages, reviewVersion]);
   const active = runs.some(r => !terminal(r.status));
-  function openEvidence(value: Omit<EvidenceLink, 'nonce'>) { setEvidence({ ...value, nonce: Date.now() }); setView('review'); }
+  function openEvidence(value: Omit<EvidenceLink, 'nonce'>) { setFile(null); setEvidence({ ...value, nonce: Date.now() }); setView('review'); }
   return <div className="session-stage"><div className="session-views" aria-label="会话视图"><button aria-pressed={view === 'conversation'} onClick={() => setView('conversation')}>对话与运行</button>
     <button aria-pressed={view === 'review'} onClick={() => setView('review')}>修改与验证</button></div>
     <div className="session-layout" data-view={view}><div className="conversation"><div className="session-heading"><h2>会话 {sessionId.slice(-8)}</h2>
-    <p>{config?.provider} · {config?.model} · <span>{session?.provider_protocol}</span></p>
-    <details><summary>模型连接</summary><p>{config?.endpoint}</p><p>{config?.api_key_configured ? '密钥已配置' : config?.provider === 'ollama' ? '本地模型无需 API 密钥' : '未配置密钥。如服务需要认证，请在左侧“Pico 模型设置”中配置一次，所有项目共用。'}</p></details></div>
-    <p className="session-config-note muted">会话保留创建时的模型；修改 Pico 默认模型后，请新建会话。</p>
+    <p>{config?.provider} · {config?.model}</p>
+    <details><summary>模型连接</summary><p>{config?.endpoint} · {session?.provider_protocol}</p><p>{config?.api_key_configured ? '密钥已配置 · 认证尚须以请求结果确认' : config?.provider === 'ollama' ? '本地模型无需 API 密钥' : '未配置密钥。如服务需要认证，请在左侧“Pico 模型设置”中配置一次，所有项目共用。'}</p></details></div>
+    {config && !config.api_key_configured && config.provider !== 'ollama' && <p className="notice">模型密钥尚未配置。请在左侧“Pico 模型设置”配置一次，各项目共用。</p>}
+    {config && defaults && (config.model !== defaults.model || config.provider !== defaults.provider || config.endpoint !== defaults.endpoint) && <p className="notice">此会话仍使用 {config.model}；当前默认是 {defaults.model}。<button onClick={onNewSession}>使用新设置开始会话</button></p>}
+    <details className="session-config-note muted"><summary>会话模型与配置说明</summary><p>会话保留创建时的模型；修改 Pico 默认模型后，请在左侧新建会话。密钥已配置不代表认证已验证，实际连接以请求结果为准。</p></details>
     {error && <p role="alert" className="error">{error}</p>}
-    <div className="conversation-scroll"><section className="history" aria-label="会话历史">{messages.filter(m => m.role !== 'tool' && (m.content || !(m.tool_calls?.length || m.tool_call_count))).map(m =>
-      <article className={`message ${m.role}`} key={m.message_id} data-message-id={m.message_id}><small>{m.role === 'user' ? '你' : 'Pico'}</small><pre>{m.content}</pre>{m.content_truncated && <small>消息已截断，完整记录可由 CLI 导出。</small>}</article>)}
+    <div className="conversation-scroll" ref={scroll} onScroll={event => { const e = event.currentTarget; follow.current = e.scrollHeight - e.scrollTop - e.clientHeight < 80; setAtBottom(follow.current); }}><section className="history" aria-label="会话历史">{messages.filter(m => m.role !== 'tool' && (m.content || !(m.tool_calls?.length || m.tool_call_count))).map(m =>
+      <article className={`message ${m.role}`} key={m.message_id} data-message-id={m.message_id}><small>{m.role === 'user' ? '你' : 'Pico'}</small>{m.role === 'assistant' ? <Answer text={m.content} onFile={openFile} /> : <pre>{m.content}</pre>}{m.content_truncated && <small>消息已截断，完整记录可由 CLI 导出。</small>}</article>)}
       {session && historyNext.current < session.history_count && <button onClick={() => void moreHistory()}>继续加载历史</button>}
       {messages.length >= 500 && <p className="muted">保留最近加载的 500 条消息。</p>}</section>
       <section className="runs" aria-label="运行记录"><div className="card-heading"><h3>运行记录</h3><select aria-label="选择运行" value={runId} onChange={e => selectRun(e.target.value)}>
         {!runId && <option value="">尚无运行</option>}{runs.map(r => <option key={r.run_id} value={r.run_id}>{r.run_id.slice(-8)} · {statusText[r.status] ?? r.status}</option>)}</select>
         {runCursor && <button disabled={runs.length >= 200} onClick={() => void moreRuns()}>更多运行</button>}</div>
         {runId && <RunPanel key={runId} workspace={workspace} runId={runId} messages={messages} onDisconnect={onDisconnect}
-          onEvidence={openEvidence} onState={state => {
+          onFile={openFile} onEvidence={openEvidence} onState={state => {
             setRuns(old => old.some(r => r.run_id === state.run_id) ? old.map(r => r.run_id === state.run_id ? { ...r, status: state.status } : r) : [state, ...old]);
             setReviewVersion(old => old.run_id === state.run_id && old.sequence === state.last_sequence ? old : { run_id: state.run_id, sequence: state.last_sequence });
           }} />}</section></div>
+    {!atBottom && <button className="latest" onClick={() => { follow.current = true; scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: 'smooth' }); }}>回到最新</button>}
     <form className="composer" onSubmit={e => { e.preventDefault(); void submit(); }}>
       {submissionError && <p role="alert" className="error">{submissionError}</p>}
       <label htmlFor="prompt">{active ? '继续发送会排队，由 Host 顺序执行' : '发送任务'}</label>
@@ -277,17 +296,19 @@ function SessionView({ workspace, sessionId, onDisconnect }: { workspace: Worksp
         {pending ? <button type="button" disabled={sending || pending.session_id !== sessionId} onClick={() => void submit(true)}>{sending ? '正在确认…' : '重试确认同一次发送'}</button>
           : <button className="primary" type="submit" disabled={sending || !prompt.trim()}>{sending ? '发送中…' : active ? '加入队列' : '发送任务'}</button>}</div>
       {pending && <p className="notice">会话 {pending.session_id.slice(-8)} 的发送结果待确认，请在该会话重试确认。将复用原请求 ID；原任务可能已经受理。</p>}
-    </form></div>{runId ? <ReviewPanel key={runId} workspace={workspace} runId={runId} revision={reviewVersion.run_id === runId ? reviewVersion.sequence : 0} link={evidence} />
+    </form></div>{file ? <FileReader key={file.nonce} workspace={workspace} runId={runId} path={file.path} line={file.line} onClose={() => { setFile(null); setView('conversation'); }} /> : runId ? <ReviewPanel key={runId} workspace={workspace} runId={runId} revision={reviewVersion.run_id === runId ? reviewVersion.sequence : 0} link={evidence} />
       : <aside className="review-pane"><h2>修改与验证</h2><p className="muted">选择运行后查看冻结差异和验证证据。</p></aside>}</div></div>;
 }
 
-function RunPanel({ workspace, runId, messages, onDisconnect, onState, onEvidence }: { workspace: Workspace; runId: string; messages: Message[]; onDisconnect: () => void; onState: (run: Run) => void; onEvidence: (link: Omit<EvidenceLink, 'nonce'>) => void }) {
+function RunPanel({ workspace, runId, messages, onDisconnect, onState, onEvidence, onFile }: { workspace: Workspace; runId: string; messages: Message[]; onDisconnect: () => void; onState: (run: Run) => void; onEvidence: (link: Omit<EvidenceLink, 'nonce'>) => void; onFile: (path: string, line: number) => void }) {
   const [run, setRun] = useState<Run | null>(null);
   const [calls, setCalls] = useState<ToolCall[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [toolPages, setToolPages] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [activity, setActivity] = useState('');
+  const [preview, setPreview] = useState({ attempt: 0, text: '', truncated: false });
+  const seenSequence = useRef(0);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [actionError, setActionError] = useState('');
@@ -320,10 +341,21 @@ function RunPanel({ workspace, runId, messages, onDisconnect, onState, onEvidenc
     const dispose = api.onActivity(event => {
       if (!active || event.subscription_id !== id || event.handle !== workspace.handle || event.run_id !== runId) return;
       if (event.error) { setError(event.error); onDisconnect(); return; }
+      for (const item of event.events) {
+        if (item.sequence <= seenSequence.current) continue;
+        seenSequence.current = item.sequence;
+        if (item.event === 'assistant_preview' && typeof item.text === 'string') setPreview(old => ({
+          attempt: item.attempt ?? 0, text: ((old.attempt === item.attempt ? old.text : '') + item.text).slice(0, 16384), truncated: !!item.truncated,
+        }));
+        if (item.event === 'model_requested') setPreview({ attempt: 0, text: '', truncated: false });
+      }
       const latest = event.events.at(-1);
       const labels: Record<string, string> = { model_requested: '等待模型响应', model_completed: '模型已响应', tool_started: '工具执行中', tool_executed: '工具结果已记录', approval_requested: '等待你的审批', cancel_requested: '取消请求已发送' };
-      if (latest && labels[latest.event]) setActivity(labels[latest.event]);
-      void refresh.current();
+      if (latest && labels[latest.event]) {
+        const actions: Record<string, string> = { read_file: '正在阅读文件', search: '正在搜索项目', list_files: '正在查看目录', run_shell: '正在执行命令', patch_file: '正在修改文件', write_file: '正在写入文件' };
+        setActivity(latest.event === 'tool_started' ? actions[latest.name ?? ''] ?? labels[latest.event] : labels[latest.event]);
+      }
+      if (event.events.some(e => e.event !== 'assistant_preview')) void refresh.current();
     });
     void api.watchRun(workspace.handle, id, runId, 0).catch(reason => { if (active) { setError(textError(reason)); onDisconnect(); } });
     return () => { active = false; dispose(); void api.stopWatch(id).catch(() => {}); };
@@ -336,11 +368,12 @@ function RunPanel({ workspace, runId, messages, onDisconnect, onState, onEvidenc
     } catch (reason) { if (alive.current) setActionError(textError(reason)); }
     finally { mutation.current = false; if (alive.current) { setBusy(''); void refresh.current(); } }
   }
-  return <div className="run-panel" data-testid="run-panel"><div className="card-heading"><code data-testid="run-id">{runId}</code>
+  return <div className="run-panel" data-testid="run-panel"><div className="card-heading"><details><summary>运行详情</summary><code data-testid="run-id">{runId}</code></details>
     <span className={`badge ${run?.status}`} data-testid="run-status">{run ? statusText[run.status] ?? run.status : '读取中'}</span>
     {run && !terminal(run.status) && <button disabled={!!busy || run.status === 'cancelling'} onClick={() => void act('cancel')}>{busy === 'cancel' || run.status === 'cancelling' ? '正在请求取消…' : '取消运行'}</button>}</div>
     {run && !terminal(run.status) && <p role="status" className="muted">{run.status === 'cancelling' ? '取消请求已发送，等待 Host 确认终态。' : activity || '等待 Host 活动；模型响应按实际记录显示。'}</p>}
-    {(run?.status === 'interrupted' || !!run?.report?.unknown_calls?.length) && <p className="notice">部分操作结果未知。请先检查工作区文件，再决定是否提交新任务。</p>}
+    {preview.text && run && run.status !== 'completed' && <article className="message assistant" data-testid="assistant-preview"><small>{terminal(run.status) ? '生成中断 · 以下内容未完成' : '正在生成 · 尚未完成'}{preview.truncated ? ' · 预览已截断' : ''}</small><Answer text={preview.text} onFile={onFile} /></article>}
+    {(run?.status === 'interrupted'  || !!run?.report?.unknown_calls?.length) && <p className="notice">部分操作结果未知。请先检查工作区文件，再决定是否提交新任务。</p>}
     {run?.stop_reason && terminal(run.status) && <p className="muted">{run.stop_reason}</p>}
     {error && <p role="alert" className="error">{error}</p>}
     {actionError && <p role="alert" className="error">{actionError}。已刷新 Host 审批与运行状态。</p>}
@@ -349,12 +382,12 @@ function RunPanel({ workspace, runId, messages, onDisconnect, onState, onEvidenc
       <p>作用范围：{a.scope.cwd}{a.scope.path !== '.' ? ` / ${a.scope.path}` : '（整个工作区）'}</p>
       <p>这是操作范围，不是精确写入预览。</p><p>有效至 {new Date(a.expires_at).toLocaleString()}</p>
       <div className="actions"><button className="primary" disabled={!!busy} onClick={() => void act(a.id, true)}>批准</button><button disabled={!!busy} onClick={() => void act(a.id, false)}>拒绝</button>{busy === a.id && <span>等待 Host 确认…</span>}</div></div>)}
-    {calls.map(c => <details className="tool-card" key={c.call_ref ?? c.call_id} data-call-id={c.call_ref ?? c.call_id}><summary><strong>{c.name}</strong><span>{c.result?.status ?? c.phase}</span></summary>
+    {!!calls.length && <details className="tool-records"><summary>工具记录（{calls.length}{hasMore ? '+' : ''}）</summary>{calls.map(c => <details className="tool-card" key={c.call_ref ?? c.call_id} data-call-id={c.call_ref ?? c.call_id}><summary><strong>{c.name}</strong><span>{c.result?.status ?? c.phase}</span></summary>
       <pre>{c.details_truncated ? c.preview : pretty({ args: c.args, result: c.result })}</pre>{c.details_truncated && <p>工具详情已截断，可用 CLI 导出完整有界执行记录。</p>}
-      <div className="evidence-links">{c.result?.metadata?.affected_paths?.slice(0, 20).map(path => <button key={path} onClick={() => onEvidence({ run_id: runId, path })}>查看文件 {path}</button>)}
+      <div className="evidence-links">{c.name === 'read_file' && c.result?.status === 'ok' && c.result.data?.path && <button onClick={() => onFile(c.result!.data!.path!, c.result!.data!.start ?? 1)}>查看已读文件</button>}{c.result?.metadata?.affected_paths?.slice(0, 20).map(path => <button key={path} onClick={() => onEvidence({ run_id: runId, path })}>查看文件 {path}</button>)}
         {c.name === 'run_shell' && c.result?.data?.purpose === 'verification' && <button onClick={() => onEvidence({ run_id: runId, call_id: c.call_id })}>查看检查记录</button>}</div></details>)}
-    {hasMore && <button disabled={toolPages >= 4} onClick={() => { pages.current++; setToolPages(pages.current); void refresh.current(); }}>更多工具记录</button>}
-    {run?.final_answer && !messages.some(m => m.role === 'assistant' && m.content === run.final_answer) && <article className="message assistant"><small>本次运行结果</small><pre>{run.final_answer}</pre></article>}
+    {hasMore && <button disabled={toolPages >= 4} onClick={() => { pages.current++; setToolPages(pages.current); void refresh.current(); }}>更多工具记录</button>}</details>}
+    {run?.final_answer && !messages.some(m => m.role === 'assistant' && (m.run_id === runId || m.content.trim() === run.final_answer.trim())) && <article className="message assistant"><small>本次运行结果</small><Answer text={run.final_answer} onFile={onFile} /></article>}
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<App />);

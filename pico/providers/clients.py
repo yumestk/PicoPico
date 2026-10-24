@@ -6,7 +6,13 @@ import urllib.error
 import urllib.request
 from http.client import RemoteDisconnected
 
-from .types import ModelProtocolError, ModelRequest, ModelResponse, ToolCall
+from .types import (
+    ModelProtocolError,
+    ModelRequest,
+    ModelRequestError,
+    ModelResponse,
+    ToolCall,
+)
 
 
 def _blocks(value):
@@ -44,25 +50,29 @@ def _usage(data):
             'total_tokens': usage.get('total_tokens')}
 
 
-def _post(url, payload, headers, timeout):
+def _post(url, payload, headers, timeout, on_text=None):
+    if on_text is not None:
+        from .streaming import stream_post
+        return stream_post(url, payload, headers, timeout, on_text)
     request = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                     headers={'Content-Type': 'application/json', 'User-Agent': 'pico/0.1', **headers}, method='POST')
     for attempt in range(3):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                body = response.read().decode('utf-8')
+                body = response.read(16 * 1024 * 1024 + 1).decode('utf-8')
+                if len(body.encode('utf-8')) > 16 * 1024 * 1024:
+                    raise ModelProtocolError('Model response exceeds size limit')
             break
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode('utf-8', errors='replace')
             if exc.code >= 500 and attempt < 2:
                 time.sleep(0.5 * (attempt + 1))
                 continue
-            raise RuntimeError(f'Model request failed with HTTP {exc.code}: {body}') from exc
+            raise ModelRequestError(exc.code) from exc
         except (urllib.error.URLError, RemoteDisconnected) as exc:
             if attempt < 2:
                 time.sleep(0.5 * (attempt + 1))
                 continue
-            raise RuntimeError(f'Could not reach model endpoint: {url}') from exc
+            raise ModelRequestError(0) from exc
     try:
         data = json.loads(body)
     except json.JSONDecodeError as exc:
@@ -121,6 +131,7 @@ class FakeModelClient:
 
 
 class OllamaModelClient:
+    supports_streaming = True
     protocol = 'ollama-chat'
     supports_prompt_cache = False
 
@@ -128,7 +139,7 @@ class OllamaModelClient:
         self.model, self.host = model, host.rstrip('/')
         self.temperature, self.top_p, self.timeout = temperature, top_p, timeout
 
-    def complete(self, request):
+    def complete(self, request, on_text=None):
         messages = [{'role': 'system', 'content': request.system}]
         for message in request.messages:
             if message['role'] == 'assistant':
@@ -140,10 +151,10 @@ class OllamaModelClient:
                 messages.append({'role': 'tool', 'tool_name': message['name'], 'content': message['content']})
             else:
                 messages.append({'role': message['role'], 'content': message['content']})
-        payload = {'model': self.model, 'messages': messages, 'stream': False, 'think': False,
+        payload = {'model': self.model, 'messages': messages, 'stream': on_text is not None, 'think': False,
                    'tools': [{'type': 'function', 'function': t} for t in request.tools],
                    'options': {'num_predict': request.max_new_tokens, 'temperature': self.temperature, 'top_p': self.top_p}}
-        data = _post(self.host + '/api/chat', payload, {}, self.timeout)
+        data = _post(self.host + '/api/chat', payload, {}, self.timeout, on_text)
         message = data.get('message')
         if not isinstance(message, dict) or not data.get('done', False):
             raise ModelProtocolError('Ollama returned an incomplete chat response')
@@ -160,6 +171,7 @@ class OllamaModelClient:
 
 
 class OpenAICompatibleModelClient:
+    supports_streaming = True
     protocol = 'openai-responses'
 
     def __init__(self, model, base_url, api_key, temperature, timeout):
@@ -167,7 +179,7 @@ class OpenAICompatibleModelClient:
         self.api_key, self.temperature, self.timeout = api_key or "", temperature, timeout
         self.supports_prompt_cache = any(host in self.base_url for host in ('openai.com', 'right.codes'))
 
-    def complete(self, request):
+    def complete(self, request, on_text=None):
         items = []
         for message in request.messages:
             if message['role'] == 'assistant':
@@ -185,13 +197,13 @@ class OpenAICompatibleModelClient:
         payload = {'model': self.model, 'instructions': request.system, 'input': items,
                    'tools': [{'type': 'function', **t, 'strict': False} for t in request.tools],
                    'tool_choice': 'auto' if request.tools else 'none', 'store': False,
-                   'include': ['reasoning.encrypted_content'], 'max_output_tokens': request.max_new_tokens, 'stream': False}
+                   'include': ['reasoning.encrypted_content'], 'max_output_tokens': request.max_new_tokens, 'stream': on_text is not None}
         if self.temperature is not None:
             payload['temperature'] = self.temperature
         if self.supports_prompt_cache and request.prompt_cache_key:
             payload['prompt_cache_key'] = request.prompt_cache_key
             payload['prompt_cache_retention'] = 'in_memory'
-        data = _post(self.base_url + '/responses', payload, {'Authorization': 'Bearer ' + self.api_key} if self.api_key else {}, self.timeout)
+        data = _post(self.base_url + '/responses', payload, {'Authorization': 'Bearer ' + self.api_key} if self.api_key else {}, self.timeout, on_text)
         blocks = _blocks(data.get('output', []))
         calls, texts, refused = [], [], False
         for block in blocks:
@@ -214,6 +226,7 @@ class OpenAICompatibleModelClient:
 
 
 class AnthropicCompatibleModelClient:
+    supports_streaming = True
     protocol = 'anthropic-messages'
     supports_prompt_cache = False
 
@@ -225,7 +238,7 @@ class AnthropicCompatibleModelClient:
         self.api_key, self.temperature, self.timeout = api_key or "", temperature, timeout
         self.thinking = dict(thinking) if thinking else None
 
-    def complete(self, request):
+    def complete(self, request, on_text=None):
         messages = []
         for message in request.messages:
             if message['role'] == 'assistant':
@@ -246,12 +259,12 @@ class AnthropicCompatibleModelClient:
         payload = {'model': self.model, 'system': request.system, 'messages': messages,
                    'tools': [{'name': t['name'], 'description': t['description'], 'input_schema': t['parameters']} for t in request.tools],
                    'tool_choice': {'type': 'auto' if request.tools else 'none'},
-                   'max_tokens': request.max_new_tokens, 'stream': False}
+                   'max_tokens': request.max_new_tokens, 'stream': on_text is not None}
         if self.temperature is not None:
             payload['temperature'] = self.temperature
         if self.thinking is not None:
             payload['thinking'] = self.thinking
-        data = _post(self.base_url + '/messages', payload, {'x-api-key': self.api_key, 'anthropic-version': '2023-06-01'}, self.timeout)
+        data = _post(self.base_url + '/messages', payload, {'x-api-key': self.api_key, 'anthropic-version': '2023-06-01'}, self.timeout, on_text)
         blocks = _blocks(data.get('content', []))
         texts = [_text(b.get('text', '')) for b in blocks if b.get('type') == 'text']
         calls = [ToolCall(b.get('name'), b.get('input'), b.get('id')) for b in blocks if b.get('type') == 'tool_use']

@@ -68,3 +68,18 @@ footer { display: flex; justify-content: space-between; border-top: 1px solid #d
 .model-settings::backdrop { background: #172d2566; } .model-settings h2 { font-size: 20px; } .model-settings p { font-size: 12px; }
 .model-settings .clear-key { display: flex; align-items: center; } .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 20px; }
 .model-settings .error { margin: 10px 0; } .session-config-note { margin: 0; padding: 8px 16px; border-bottom: 1px solid #e1e6dc; }
+
+/* Daily use: conversation first, evidence on request. */
+.session-views { display: flex; gap: 6px; padding: 8px 16px; border-bottom: 1px solid #dfe4da; }
+.session-layout[data-view=conversation] > .review-pane { display: none; }
+.diagnostics { position: relative; font-size: 11px; } .diagnostics[open] { padding: 8px; background: white; border: 1px solid #dfe4da; border-radius: 8px; }
+.markdown { font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; }
+.markdown h1 { font-size: 21px; } .markdown h2 { font-size: 18px; } .markdown h3 { font-size: 15px; }
+.markdown table { display: block; overflow-x: auto; border-collapse: collapse; } .markdown td, .markdown th { padding: 6px 10px; border: 1px solid #dfe4da; }
+.markdown pre { font-family: ui-monospace, monospace; white-space: pre; overflow-x: auto; border: 1px solid #dfe4da; border-radius: 6px; }
+.code-block { display: block; } .code-actions { display: flex; justify-content: space-between; align-items: center; padding: 4px 10px; background: #eff2ed; font-size: 11px; }
+.code-block > code { display: block; padding: 10px; } .code-actions button { padding: 3px 8px; }
+.text-link, .file-reference { border: 0; padding: 0 2px; background: transparent; color: #286545; text-decoration: underline; font-size: inherit; }
+.file-reference { font-family: ui-monospace, monospace; } .latest { align-self: center; margin: 5px; }
+.file-reader { overflow-y: auto; } .file-reader .diff-text { flex: 1; min-height: 160px; white-space: pre-wrap; }
+@media (min-width: 1101px) { .session-layout[data-view=review] > .conversation { display: flex; } }
